@@ -1,115 +1,319 @@
 # =============================================================================
-# Buffett Screener — Filter Configuration
-# All thresholds, weights, and parameters live here.
-# Edit this file to adjust screening criteria without touching code.
+# Buffett Screener — Master Configuration
+#
+# Single source of truth for every threshold, weight, and parameter used
+# anywhere in the codebase. No numeric constants may appear in Python source
+# files other than this file.
+#
+# Loaded exclusively via screener/filter_config_loader.py. Never call
+# yaml.safe_load() directly in business logic.
 # =============================================================================
+
 
 # ---------------------------------------------------------------------------
 # Universe
 # ---------------------------------------------------------------------------
 universe:
-  exchanges: ["NYSE", "NASDAQ", "AMEX"]   # add "TSX" to include Canadian equities
-  min_market_cap_usd: 500_000_000          # $500M minimum
-  min_avg_daily_volume: 100_000            # shares/day
-  include_indices: ["S&P 500", "Russell 1000"]
+  exchanges: [TSX, NYSE, NASDAQ]   # Add or remove to scope the screening universe
+  min_market_cap_usd: 500_000_000  # $500M USD minimum — full dollars, not thousands
+  min_history_years: 8             # Minimum complete fiscal years required for inclusion
+  required_history_years: 10       # Target history window for all formulas
+
 
 # ---------------------------------------------------------------------------
-# Hard Filters  (fail any → ticker is excluded)
+# Data Sources & API Configuration
 # ---------------------------------------------------------------------------
-hard_filters:
-  profitability:
-    min_years_profitable: 7                # net income > 0 in 7 of last 10 years
-    min_gross_margin_pct: 20.0
-    min_operating_margin_pct: 8.0
+data_sources:
+  primary_api: fmp                 # "fmp" or "yfinance"
+  store_raw_responses: true        # Write raw API JSON to data/raw/ before transforming
+  raw_data_dir: data/raw
 
-  returns:
-    min_roic_pct: 10.0
-    min_roe_pct: 12.0
+  fmp:
+    base_url: https://financialmodelingprep.com/api/v3
+    rate_limit_per_min: 300        # FMP Starter tier; adjust for higher tiers
 
-  leverage:
-    max_debt_to_equity: 1.5
-    max_net_debt_to_ebitda: 3.0
-    min_interest_coverage: 3.0
+  yfinance:
+    rate_limit_per_sec: 2          # Informal limit — throttle to avoid IP blocking
 
-  cashflow:
-    min_fcf_positive_years: 6
-    min_fcf_margin_pct: 5.0
+  fred:
+    base_url: https://api.stlouisfed.org/fred/series/observations
+    rate_limit_per_min: 120
+    series:
+      treasury_10yr: DGS10                  # US 10-year Treasury yield (daily)
+      goc_10yr: IRLTLT01CAM156N             # GoC 10-year bond yield (monthly, IMF-sourced)
+      usd_cad: DEXCAUS                      # USD per 1 CAD (daily)
+      cpi_us: CPIAUCSL                      # US CPI, seasonally adjusted
+    goc_yield_source: fred                  # "fred" or "bankofcanada"
 
-  liquidity:
-    min_current_ratio: 1.0
+  sec_edgar:
+    enable_fallback: false
+    rate_limit_per_sec: 8                   # SEC ToS: max 10/sec; stay at 8
+    # SEC_USER_AGENT must be set in .env: "FirstName LastName email@example.com"
 
-# ---------------------------------------------------------------------------
-# Soft Filters  (scored; low scores reduce rank, don't exclude)
-# ---------------------------------------------------------------------------
-soft_filters:
-  margin_consistency:
-    gross_margin_std_max_pct: 5.0
-    operating_margin_std_max_pct: 4.0
+  retry:
+    max_attempts: 3
+    base_wait_seconds: 1.0                  # Exponential backoff: wait = base × 2^attempt + jitter
+    retry_on_status: [429, 500, 502, 503, 504]
 
-  growth:
-    min_revenue_cagr_5yr_pct: 5.0
-    min_eps_cagr_5yr_pct: 5.0
-    min_bvps_cagr_5yr_pct: 5.0
-
-  capex_intensity:
-    max_capex_to_revenue_pct: 10.0
-    max_capex_to_ocf_pct: 40.0
-
-  owner_earnings:
-    min_owner_earnings_yield_pct: 4.0
 
 # ---------------------------------------------------------------------------
-# Composite Score Weights  (must sum to 1.0)
-# ---------------------------------------------------------------------------
-composite_weights:
-  roic: 0.25
-  roe: 0.10
-  owner_earnings_yield: 0.20
-  gross_margin_consistency: 0.10
-  revenue_cagr: 0.10
-  fcf_margin: 0.10
-  debt_safety: 0.10
-  earnings_yield_vs_bond: 0.05
-
-# ---------------------------------------------------------------------------
-# Valuation / DCF
-# ---------------------------------------------------------------------------
-valuation:
-  dcf:
-    projection_years: 10
-    terminal_growth_rate_pct: 3.0
-    discount_rate_pct: 10.0
-    owner_earnings_growth_rates:
-      high_growth_years: 5
-      high_growth_rate_pct: 12.0
-      fade_growth_rate_pct: 6.0
-
-  margin_of_safety:
-    conservative_pct: 50.0
-    moderate_pct: 33.0
-    aggressive_pct: 20.0
-
-  earnings_yield:
-    risk_free_proxy: "10Y_treasury"
-    min_spread_over_rfr_pct: 2.0
-
-# ---------------------------------------------------------------------------
-# Sector Exclusions
+# Sector & SIC Exclusions
+# Applied by screener/exclusions.py before any filter or scoring.
 # ---------------------------------------------------------------------------
 exclusions:
-  sectors:
-    - "Financials"
-    - "Utilities"
-    - "Real Estate"
-  flags:
-    - "SPAC"
-    - "shell_company"
+  sic_codes:
+    - [6020, 6029]   # Commercial banks
+    - [6035, 6036]   # Savings institutions
+    - [6311, 6399]   # Insurance carriers
+    - [6726, 6726]   # Investment offices / holding companies
+    - [6798, 6798]   # Real estate investment trusts (REITs)
+
+  sectors: []        # GICS sector-level fallback when SIC unavailable.
+                     # Leave empty to rely solely on SIC codes.
+                     # Example: ["Financials", "Utilities", "Real Estate"]
+
+  flags:             # Company-type flags sourced from FMP or yfinance profile
+    - SPAC
+    - shell_company
+
+
+# ---------------------------------------------------------------------------
+# Data Quality
+# ---------------------------------------------------------------------------
+data_quality:
+  min_field_coverage_years: 8     # Drop ticker if required field available in < 8 of 10 years
+  cross_validate_sample_size: 20  # Number of tickers to cross-check FMP vs yfinance
+  cross_validate_tolerance: 0.05  # Flag if FMP vs yfinance diverge by > 5% on same field
+  max_substitutions_before_flag: 2  # Flag ticker if > 2 line items required substitution
+
+
+# ---------------------------------------------------------------------------
+# Hard Filters  (Tier 1 — binary pass/fail; any failure = exclusion)
+# Implemented in screener/hard_filters.py
+# ---------------------------------------------------------------------------
+hard_filters:
+  min_profitable_years: 8         # Net income > 0 in at least 8 of last 10 fiscal years (F10)
+  min_avg_roe: 0.15               # 10-year average ROE ≥ 15% (F3)
+  min_eps_cagr: 0.0               # 10-year EPS CAGR must be positive (F11)
+  max_debt_payoff_years: 5        # Long-term debt payable in ≤ 5 years of owner earnings (F5)
+
+
+# ---------------------------------------------------------------------------
+# Soft Scores  (Tier 2 — scored 0–100 per criterion, then weighted)
+# Implemented in screener/soft_filters.py and metrics_engine/composite_score.py
+# Weights must sum to 1.0 — filter_config_loader raises ValueError if they do not.
+# ---------------------------------------------------------------------------
+soft_scores:
+
+  roe:
+    weight: 0.15
+    # Base score from 10-year average ROE using linear interpolation:
+    # 0% → 0, 15% → 50, 25%+ → 100
+    score_floor_value: 0.15       # ROE at this level scores 50
+    score_ceiling_value: 0.25     # ROE at or above this level scores 100
+    # Variance penalty: subtract penalty_points if stdev of annual ROE > threshold
+    variance_penalty_threshold: 0.05   # stdev > 5% → apply penalty
+    variance_penalty_points: 15        # Points subtracted; score floored at 0
+
+  gross_margin:
+    weight: 0.10
+    # Linear interpolation between breakpoints {value: score}
+    breakpoints:
+      0.20: 0
+      0.40: 70
+      0.60: 100
+
+  sga_ratio:
+    weight: 0.08
+    # SGA as % of gross profit. Lower = better.
+    # < excellent_threshold → 100; linear decay to fail_threshold → 0
+    excellent_threshold: 0.30     # < 30% of gross profit → score 100
+    fail_threshold: 0.80          # ≥ 80% → score 0
+
+  eps_growth:
+    weight: 0.15
+    # CAGR component: linear from 0% CAGR → 0 to cagr_floor → 50 to cagr_ceiling → 100
+    cagr_floor: 0.10              # 10% CAGR maps to score 50
+    cagr_ceiling: 0.20            # ≥ 20% CAGR maps to score 100
+    # Consistency multiplier applied to CAGR component score
+    # Key = number of EPS decline years over 10-year window
+    consistency_multipliers:
+      0: 1.0
+      1: 0.9
+      2: 0.8
+      3: 0.6                      # 3 or more decline years → 0.6×
+
+  debt_conservatism:
+    weight: 0.10
+    # D/E ratio. Lower = better.
+    # < excellent_de → 100; linear decay to fail_de → 0; negative equity → 0
+    excellent_de: 0.20            # D/E < 0.2 → score 100
+    fail_de: 0.80                 # D/E ≥ 0.8 → score 0
+
+  owner_earnings_growth:
+    weight: 0.12
+    # 10-year owner earnings CAGR. Same breakpoints as eps_growth.
+    # References eps_growth.cagr_floor and eps_growth.cagr_ceiling at runtime.
+    scoring: same_as_eps_growth   # Sentinel value — code reads eps_growth breakpoints
+    min_computable_years: 5       # Score = 0 if owner earnings computable for < 5 years
+
+  capital_efficiency:
+    weight: 0.08
+    # CapEx as % of net income. Lower = better.
+    # < excellent_capex_ratio → 100; linear decay to fail_capex_ratio → 0
+    excellent_capex_ratio: 0.25   # CapEx/NI < 25% → score 100
+    fail_capex_ratio: 0.75        # CapEx/NI ≥ 75% → score 0
+
+  buyback:
+    weight: 0.05
+    # Net share count change over 10 years. Positive = reduction (buyback). Negative = dilution.
+    # Breakpoints map net_change → score. Linear interpolation between adjacent keys.
+    breakpoints:
+      -0.05: 0                    # > 5% dilution → score 0
+       0.00: 20                   # 0–5% dilution → score 20
+       0.05: 40                   # 0–5% reduction → score 40
+       0.10: 70                   # 5–10% reduction → score 70
+       0.15: 100                  # ≥ 15% reduction → score 100 (capped)
+
+  retained_earnings_return:
+    weight: 0.10
+    # Return on retained earnings (Buffett's "$1 test", F4).
+    # Linear interpolation: 0% → 0, good → good_score, excellent → 100
+    excellent: 0.15               # ≥ 15% → score 100
+    good: 0.12                    # 12% → score 70
+    good_score: 70
+    floor: 0.00                   # 0% → score 0; below 0% → score 0
+
+  interest_coverage:
+    weight: 0.07
+    # Interest expense as % of EBIT. Lower = better.
+    # < excellent → 100; excellent–good → 70; linear decay to fail → 0
+    excellent: 0.10               # Interest < 10% of EBIT → score 100
+    good: 0.15                    # 10–15% → score 70
+    fail: 0.30                    # ≥ 30% → score 0
+    # Special cases (handled in code, not here):
+    #   EBIT ≤ 0 → score 0
+    #   interest = 0 AND long_term_debt = 0 → score 100 (debt-free pass)
+
+
+# ---------------------------------------------------------------------------
+# Valuation  (F14 — Three-Scenario Intrinsic Value)
+# ---------------------------------------------------------------------------
+valuation:
+  projection_years: 10            # DCF projection horizon (years)
+  terminal_growth_rate: 0.03      # Perpetuity growth rate after projection period
+
+  scenarios:
+    bear:
+      growth_multiplier: 0.5      # Historical EPS CAGR × 0.5
+      pe_cap: 12                  # Terminal P/E = min(historical_avg_pe, 12)
+      risk_premium: 0.05          # Discount rate = risk_free_rate + 5%
+      probability: 0.25           # Weight in weighted average IV
+
+    base:
+      growth_multiplier: 1.0      # Historical EPS CAGR × 1.0
+      pe_method: median_historical # Terminal P/E = median of 10-year historical P/E
+      risk_premium: 0.03          # Discount rate = risk_free_rate + 3%
+      probability: 0.50
+
+    bull:
+      growth_multiplier: 1.3      # Historical EPS CAGR × 1.3
+      pe_floor: 20                # Terminal P/E = max(historical_avg_pe, 20)
+      risk_premium: 0.02          # Discount rate = risk_free_rate + 2%
+      probability: 0.25
+
+  hurdle_rate: 0.15               # Minimum acceptable owner earnings yield for BUY (F2)
+
+  # Margin of safety buy-below thresholds (F15)
+  mos_conservative: 0.50          # 50% MoS — most conservative entry
+  mos_moderate: 0.33              # 33% MoS — standard entry
+  mos_aggressive: 0.20            # 20% MoS — aggressive entry
+
+
+# ---------------------------------------------------------------------------
+# Recommendations
+# ---------------------------------------------------------------------------
+recommendations:
+  buy_min_mos: 0.25               # MoS ≥ 25% required for BUY
+  buy_min_score: 70               # Composite score ≥ 70 required for BUY
+  hold_min_mos: 0.10              # MoS ≥ 10% required for HOLD
+  hold_min_score: 60              # Composite score ≥ 60 required for HOLD
+
+  confidence:
+    high_min_years: 8             # ≥ 8 complete fiscal years
+    high_max_substitutions: 0     # 0 line-item substitutions
+    high_min_mos: 0.30            # MoS > 30%
+    moderate_max_substitutions: 2 # ≤ 2 substitutions
+    moderate_min_mos: 0.15        # MoS ≥ 15%
+
+  # RRSP/TFSA account logic
+  rrsp_us_dividend_yield_threshold: 0.01   # US stocks with yield ≥ 1% → RRSP recommended
+  tfsa_preference_min_expected_return: 0.12  # Expected return ≥ 12% → prioritize TFSA
+
+  # Position sizing guidance (fraction of model portfolio)
+  position_sizing:
+    high_confidence_high_score:   [0.08, 0.10]   # Score ≥ 80, High confidence
+    high_confidence_mid_score:    [0.05, 0.07]   # Score 70–79, High confidence
+    moderate_confidence_high_score: [0.03, 0.05] # Score ≥ 70, Moderate confidence
+    moderate_confidence_mid_score:  [0.02, 0.03] # Score 60–69, Moderate confidence
+    low_confidence:               [0.01, 0.02]   # Any score, Low confidence
+
+  time_horizon:
+    standard_years: 10
+    extended_min_score: 80        # Score ≥ 80 AND eps_cagr ≥ extended_min_cagr → 15yr horizon
+    extended_min_eps_cagr: 0.15
+    extended_years: 15
+    shortened_years: 5            # Low confidence or thin MoS → 5yr horizon
+
+
+# ---------------------------------------------------------------------------
+# Sell Signals
+# Generated per security by recommendation.py; evaluated on each pipeline run.
+# ---------------------------------------------------------------------------
+sell_signals:
+  roe_floor: 0.12                 # ROE drops below 12%...
+  roe_consecutive_years: 2        # ...for 2 consecutive years → sell signal
+  gross_margin_decline_pct_points: 0.05   # Gross margin declines > 5pp...
+  gross_margin_decline_years: 3           # ...over any 3-year rolling window → sell signal
+  max_de_ratio: 1.0               # D/E exceeds 1.0 → sell signal
+  max_debt_payoff_years: 5        # Debt payoff years exceed 5 → sell signal
+  min_retained_earnings_return: 0.08  # F4 drops below 8% (trailing 5yr) → sell signal
+  overvaluation_vs_scenario: bull # Price exceeds this scenario's IV → sell signal
+
 
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 output:
-  top_n_stocks: 20
-  report_currency: "USD"
+  shortlist_size: 50              # Top N tickers passed to valuation_reports/
+  sensitivity_top_n: 10          # Number of shortlisted tickers to include sensitivity grids
+  sensitivity_eps_range: 0.30    # EPS growth varied ±30% in sensitivity grid
+  sensitivity_pe_range: 0.25     # Terminal P/E varied ±25% in sensitivity grid
+  sensitivity_discount_bps: 200  # Discount rate varied ±200bps in sensitivity grid
+  currency_display: CAD          # Display currency in reports (USD internally; converted for output)
   date_format: "%Y-%m-%d"
   streamlit_port: 8501
+  report_dir: data/reports
+  db_path: data/processed/buffett.duckdb
+  parquet_dir: data/processed/parquet
+  enable_parquet_export: false   # Set true to mirror DuckDB tables to Parquet
+
+
+# ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+reports:
+  enable_qualitative: false      # Set true to enable LLM-assisted moat assessment
+  # Thresholds for auto-generating quantitative moat proxy comments in reports
+  moat_gross_margin_threshold: 0.40    # ≥ 40% gross margin → "consistent with pricing power"
+  moat_roe_threshold: 0.15            # ≥ 15% ROE → "consistent with durable advantage"
+  moat_margin_stability_threshold: 0.05  # Gross margin stdev < 5% → "stable"
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  level: INFO                    # INFO | WARNING | ERROR | DEBUG
+  log_file: data/pipeline.log
+  log_raw_api_responses: false   # Set true only for troubleshooting (DEBUG level)
