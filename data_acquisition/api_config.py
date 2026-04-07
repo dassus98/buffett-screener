@@ -15,11 +15,62 @@ Environment variables expected:
 
 from __future__ import annotations
 
+import functools
+import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable, TypeVar
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def retry(max_attempts: int = 3, backoff_base: float = 2.0) -> Callable[[F], F]:
+    """
+    Module-level retry decorator with exponential back-off.
+
+    Args:
+        max_attempts: Maximum number of total attempts (including the first).
+        backoff_base: Base for exponential back-off; sleep = backoff_base ** attempt.
+
+    Returns:
+        Decorator that wraps a function with retry logic.
+    """
+    def decorator(func: F) -> F:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            last_exc: Exception | None = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    if attempt < max_attempts - 1:
+                        sleep_secs = backoff_base ** attempt
+                        logger.warning(
+                            "Attempt %d/%d for %s failed (%s). Retrying in %.1fs.",
+                            attempt + 1,
+                            max_attempts,
+                            func.__qualname__,
+                            exc,
+                            sleep_secs,
+                        )
+                        time.sleep(sleep_secs)
+                    else:
+                        logger.error(
+                            "All %d attempts for %s failed. Last error: %s",
+                            max_attempts,
+                            func.__qualname__,
+                            exc,
+                        )
+            raise last_exc  # type: ignore[misc]
+        return wrapper  # type: ignore[return-value]
+    return decorator
 
 
 def load_env(env_path: Path | None = None) -> None:
@@ -40,7 +91,18 @@ def load_env(env_path: Path | None = None) -> None:
         Raise EnvironmentError if no .env file is found and env_path was
         explicitly provided.
     """
-    ...
+    if env_path is not None:
+        resolved = Path(env_path).resolve()
+        if not resolved.exists():
+            raise EnvironmentError(
+                f"Explicit .env path not found: {resolved}. "
+                "Check the path passed to load_env()."
+            )
+        loaded = load_dotenv(dotenv_path=resolved, override=False)
+        logger.info("load_dotenv(%s) → loaded=%s", resolved, loaded)
+    else:
+        loaded = load_dotenv(override=False)
+        logger.info("load_dotenv(auto-search) → loaded=%s", loaded)
 
 
 @dataclass(frozen=True)
@@ -68,13 +130,16 @@ class FredConfig:
 
         Raises:
             EnvironmentError: if FRED_API_KEY is not set.
-
-        Logic:
-            Call load_env() to ensure the .env file has been loaded, then
-            read os.environ["FRED_API_KEY"]. Raise a descriptive error if
-            the key is missing or empty.
         """
-        ...
+        load_env()
+        api_key = os.environ.get("FRED_API_KEY", "").strip()
+        if not api_key:
+            raise EnvironmentError(
+                "FRED_API_KEY is not set or is empty. "
+                "Add it to your .env file: FRED_API_KEY=your_key_here"
+            )
+        logger.debug("FredConfig loaded from environment (key length=%d).", len(api_key))
+        return cls(api_key=api_key)
 
 
 @dataclass(frozen=True)
@@ -109,12 +174,22 @@ class SecEdgarConfig:
         Raises:
             EnvironmentError: if SEC_USER_AGENT is not set or does not look
                               like a valid "Name email" string.
-
-        Logic:
-            Validate the user_agent string contains an "@" (basic email check).
-            Raise a descriptive error pointing at .env if validation fails.
         """
-        ...
+        load_env()
+        user_agent = os.environ.get("SEC_USER_AGENT", "").strip()
+        if not user_agent:
+            raise EnvironmentError(
+                "SEC_USER_AGENT is not set or is empty. "
+                "Add it to your .env file: SEC_USER_AGENT=YourName contact@example.com"
+            )
+        if "@" not in user_agent:
+            raise EnvironmentError(
+                f"SEC_USER_AGENT does not appear to contain an email address: "
+                f"'{user_agent}'. SEC EDGAR requires a valid contact email in the "
+                "User-Agent string (e.g. 'MyApp contact@example.com')."
+            )
+        logger.debug("SecEdgarConfig loaded from environment (user_agent=%r).", user_agent)
+        return cls(user_agent=user_agent)
 
 
 @dataclass(frozen=True)
@@ -144,7 +219,16 @@ class FmpConfig:
             FMP is an optional source; callers should catch EnvironmentError
             and fall back gracefully rather than failing the pipeline.
         """
-        ...
+        load_env()
+        api_key = os.environ.get("FMP_API_KEY", "").strip()
+        if not api_key:
+            raise EnvironmentError(
+                "FMP_API_KEY is not set or is empty. "
+                "Add it to your .env file: FMP_API_KEY=your_key_here  "
+                "(FMP is optional; the pipeline will continue without it.)"
+            )
+        logger.debug("FmpConfig loaded from environment (key length=%d).", len(api_key))
+        return cls(api_key=api_key)
 
 
 def get_all_configs() -> dict[str, object]:
@@ -164,4 +248,26 @@ def get_all_configs() -> dict[str, object]:
         Suppress EnvironmentError only for FmpConfig (optional dependency).
         Re-raise EnvironmentError for FRED and SEC configs (required).
     """
-    ...
+    load_env()
+
+    configs: dict[str, object] = {}
+
+    # Required configs — propagate EnvironmentError to caller
+    configs["fred"] = FredConfig.from_env()
+    logger.info("FredConfig loaded successfully.")
+
+    configs["sec"] = SecEdgarConfig.from_env()
+    logger.info("SecEdgarConfig loaded successfully.")
+
+    # Optional config — swallow error and log a warning
+    try:
+        configs["fmp"] = FmpConfig.from_env()
+        logger.info("FmpConfig loaded successfully.")
+    except EnvironmentError as exc:
+        logger.warning(
+            "FmpConfig not available (FMP_API_KEY missing or invalid): %s. "
+            "FMP fallback disabled.",
+            exc,
+        )
+
+    return configs

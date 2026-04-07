@@ -166,12 +166,20 @@ class TickerDataBundle:
 
     def latest_income(self) -> Optional[IncomeStatement]:
         """Return the most recent annual income statement by fiscal_year_end."""
-        ...
+        annual = [s for s in self.income_statements if s.period == "annual"]
+        if not annual:
+            return None
+        return max(annual, key=lambda s: s.fiscal_year_end)
 
     def latest_balance_sheet(self) -> Optional[BalanceSheet]:
         """Return the most recent annual balance sheet by fiscal_year_end."""
-        ...
+        if not self.balance_sheets:
+            return None
+        return max(self.balance_sheets, key=lambda s: s.fiscal_year_end)
 
     def latest_cash_flow(self) -> Optional[CashFlowStatement]:
         """Return the most recent annual cash flow statement by fiscal_year_end."""
-        ...
+        annual = [s for s in self.cash_flow_statements if s.period == "annual"]
+        if not annual:
+            return None
+        return max(annual, key=lambda s: s.fiscal_year_end)
