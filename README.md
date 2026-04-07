@@ -1,13 +1,13 @@
-# Buffett Screener
+# buffett-screener
 
 A Warren Buffett-style fundamental stock screener and intrinsic value engine.
 
 ## Philosophy
 
-This screener operationalises the core tenets from Buffett's letters to shareholders,
+Operationalises the core tenets from Buffett's letters to shareholders,
 *The Intelligent Investor* (Graham), and *Security Analysis*:
 
-- **Owner Earnings** over GAAP earnings
+- **Owner Earnings** over GAAP net income
 - **ROIC > WACC** as the primary quality gate
 - **Moat proxies** via consistent margins and low capital intensity
 - **Margin of Safety** before every buy decision
@@ -15,46 +15,49 @@ This screener operationalises the core tenets from Buffett's letters to sharehol
 ## Quickstart
 
 ```bash
-# Install dependencies
-poetry install
+# Install
+pip install -e ".[dev]"
 
-# Copy env template and add API keys
+# Configure API keys
 cp .env.example .env
+# edit .env
 
-# Run the full screening pipeline
+# Run the full pipeline
 python -m output.pipeline_runner
 
-# Launch the Streamlit dashboard
+# Launch dashboard
 streamlit run output/streamlit_app.py
 ```
 
 ## Architecture
 
 ```
-data_acquisition/   → Fetch & validate raw financial + market data
-metrics_engine/     → Compute owner earnings, ROIC, margins, growth, valuation multiples
-screener/           → Apply hard filters, soft scores, composite ranking
-valuation_reports/  → DCF, margin-of-safety, earnings yield, PDF/Markdown reports
-output/             → Streamlit dashboard, Markdown export, pipeline orchestration
+data_acquisition/   → Fetch, validate, and cache raw financial + market data
+metrics_engine/     → Compute owner earnings, ROIC, margins, growth, multiples
+screener/           → Hard filters → soft scoring → composite ranking
+valuation_reports/  → DCF intrinsic value, margin of safety, Markdown reports
+output/             → Streamlit dashboard, export, pipeline orchestration
 ```
 
 ## Configuration
 
-All thresholds and weights live in `config/filter_config.yaml`. No code changes are
-needed to adjust screening criteria — edit the YAML and re-run.
+All thresholds and weights live in `config/filter_config.yaml`.
+No code changes needed to adjust screening criteria.
 
-## Data Sources
+## Documentation
 
-| Source      | Used for                              |
-|-------------|---------------------------------------|
-| yfinance    | Price, market cap, basic financials   |
-| FRED (API)  | Risk-free rate, CPI, macro indicators |
-| SEC EDGAR   | Full XBRL financial statements        |
-
-API keys are loaded from `.env` (see `.env.example`).
+| Doc | Contents |
+|-----|----------|
+| `docs/FORMULAS.md` | Every financial formula used in `metrics_engine/` |
+| `docs/ARCHITECTURE.md` | Module dependency map and data flow |
+| `docs/SCORING.md` | Composite score weights and normalisation method |
+| `docs/DATA_SOURCES.md` | API sources, field mappings, rate limits |
+| `docs/REPORT_SPEC.md` | Report template field reference |
 
 ## Testing
 
 ```bash
-pytest --cov
+pytest --tb=short
+ruff check .
+mypy .
 ```

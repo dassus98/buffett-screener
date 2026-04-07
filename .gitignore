@@ -1,26 +1,15 @@
-# Environment & secrets
-.env
-
-# Local data store
 data/
-
-# Python
+.env
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
+.mypy_cache/
+.ruff_cache/
 *.egg-info/
-.venv/
-venv/
 dist/
 build/
-
-# Coverage
-.coverage
+.venv/
+venv/
+.pytest_cache/
 htmlcov/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
+.coverage

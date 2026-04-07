@@ -8,55 +8,55 @@
 # Universe
 # ---------------------------------------------------------------------------
 universe:
-  exchanges: ["NYSE", "NASDAQ", "AMEX"]
-  min_market_cap_usd: 500_000_000        # $500M minimum (exclude micro-caps)
-  min_avg_daily_volume: 100_000          # shares/day — ensure liquidity
+  exchanges: ["NYSE", "NASDAQ", "AMEX"]   # add "TSX" to include Canadian equities
+  min_market_cap_usd: 500_000_000          # $500M minimum
+  min_avg_daily_volume: 100_000            # shares/day
   include_indices: ["S&P 500", "Russell 1000"]
 
 # ---------------------------------------------------------------------------
-# Hard Filters  (fail any → ticker is excluded outright)
+# Hard Filters  (fail any → ticker is excluded)
 # ---------------------------------------------------------------------------
 hard_filters:
   profitability:
-    min_years_profitable: 7              # net income > 0 in 7 of last 10 years
-    min_gross_margin_pct: 20.0           # %
-    min_operating_margin_pct: 8.0        # %
+    min_years_profitable: 7                # net income > 0 in 7 of last 10 years
+    min_gross_margin_pct: 20.0
+    min_operating_margin_pct: 8.0
 
   returns:
-    min_roic_pct: 10.0                   # return on invested capital
-    min_roe_pct: 12.0                    # return on equity
+    min_roic_pct: 10.0
+    min_roe_pct: 12.0
 
   leverage:
-    max_debt_to_equity: 1.5              # total debt / shareholders equity
-    max_net_debt_to_ebitda: 3.0          # net debt / EBITDA
-    min_interest_coverage: 3.0           # EBIT / interest expense
+    max_debt_to_equity: 1.5
+    max_net_debt_to_ebitda: 3.0
+    min_interest_coverage: 3.0
 
   cashflow:
-    min_fcf_positive_years: 6            # positive FCF in 6 of last 10 years
-    min_fcf_margin_pct: 5.0              # FCF / revenue
+    min_fcf_positive_years: 6
+    min_fcf_margin_pct: 5.0
 
   liquidity:
     min_current_ratio: 1.0
 
 # ---------------------------------------------------------------------------
-# Soft Filters  (scored; low scores reduce composite rank, not exclude)
+# Soft Filters  (scored; low scores reduce rank, don't exclude)
 # ---------------------------------------------------------------------------
 soft_filters:
   margin_consistency:
-    gross_margin_std_max_pct: 5.0        # std dev of gross margin over 10yr
+    gross_margin_std_max_pct: 5.0
     operating_margin_std_max_pct: 4.0
 
   growth:
     min_revenue_cagr_5yr_pct: 5.0
     min_eps_cagr_5yr_pct: 5.0
-    min_bvps_cagr_5yr_pct: 5.0          # book value per share
+    min_bvps_cagr_5yr_pct: 5.0
 
   capex_intensity:
-    max_capex_to_revenue_pct: 10.0       # low capex = asset-light / wide moat proxy
-    max_capex_to_ocf_pct: 40.0           # capex / operating cash flow
+    max_capex_to_revenue_pct: 10.0
+    max_capex_to_ocf_pct: 40.0
 
   owner_earnings:
-    min_owner_earnings_yield_pct: 4.0    # owner earnings / market cap
+    min_owner_earnings_yield_pct: 4.0
 
 # ---------------------------------------------------------------------------
 # Composite Score Weights  (must sum to 1.0)
@@ -72,45 +72,44 @@ composite_weights:
   earnings_yield_vs_bond: 0.05
 
 # ---------------------------------------------------------------------------
-# Valuation & DCF Parameters
+# Valuation / DCF
 # ---------------------------------------------------------------------------
 valuation:
   dcf:
     projection_years: 10
-    terminal_growth_rate_pct: 3.0        # long-run nominal GDP growth
-    discount_rate_pct: 10.0              # Buffett's hurdle rate (pre-tax equiv)
-    owner_earnings_growth_rates:         # tiered growth assumption
+    terminal_growth_rate_pct: 3.0
+    discount_rate_pct: 10.0
+    owner_earnings_growth_rates:
       high_growth_years: 5
       high_growth_rate_pct: 12.0
-      fade_growth_rate_pct: 6.0          # years 6–10
+      fade_growth_rate_pct: 6.0
 
   margin_of_safety:
-    conservative_pct: 50.0              # buy below 50% of intrinsic value
+    conservative_pct: 50.0
     moderate_pct: 33.0
     aggressive_pct: 20.0
 
   earnings_yield:
-    risk_free_proxy: "10Y_treasury"      # FRED series to use
-    min_spread_over_rfr_pct: 2.0         # earnings yield must exceed RFR by this much
+    risk_free_proxy: "10Y_treasury"
+    min_spread_over_rfr_pct: 2.0
 
 # ---------------------------------------------------------------------------
-# Sector Exclusions  (hard-coded industries to skip)
+# Sector Exclusions
 # ---------------------------------------------------------------------------
 exclusions:
   sectors:
-    - "Financials"                       # banks require different analysis
-    - "Utilities"                        # regulated, capital-heavy
-    - "Real Estate"                      # REITs have distinct metrics
+    - "Financials"
+    - "Utilities"
+    - "Real Estate"
   flags:
-    - "ADR"                              # optionally exclude foreign ADRs
     - "SPAC"
     - "shell_company"
 
 # ---------------------------------------------------------------------------
-# Output / Reporting
+# Output
 # ---------------------------------------------------------------------------
 output:
-  top_n_stocks: 20                       # stocks to include in summary table
+  top_n_stocks: 20
   report_currency: "USD"
   date_format: "%Y-%m-%d"
   streamlit_port: 8501
