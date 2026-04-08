@@ -7,20 +7,28 @@ importable without creating a circular dependency).
 
 Usage
 -----
-    from screener.filter_config_loader import get_config
+    from screener.filter_config_loader import get_config, get_threshold
 
     cfg = get_config()
     min_cap = cfg["universe"]["min_market_cap_usd"]
+
+    roe_floor = get_threshold("hard_filters.min_avg_roe")   # → 0.15
 
 The config is loaded once per process and cached at module level. Call
 ``reload_config()`` in tests that need a fresh load after patching the file path.
 
 Key exports
 -----------
+load_config() -> dict
+    Load and return the validated config dict (alias for get_config).
 get_config() -> dict
     Return the validated config dict (cached after first call).
+get_threshold(path) -> Any
+    Dot-notation accessor: get_threshold("hard_filters.min_avg_roe") → 0.15.
 reload_config() -> dict
     Force a re-read from disk and reset the cache. Intended for tests only.
+ConfigError
+    Raised when a requested key path is not found in the config.
 ConfigValidationError
     Raised when required keys are absent or weights don't sum to 1.0.
 """
@@ -71,6 +79,17 @@ _WEIGHT_KEYS = (
 _WEIGHT_TOLERANCE = 1e-6
 
 
+class ConfigError(Exception):
+    """Raised when a requested config key path does not exist.
+
+    Parameters
+    ----------
+    message:
+        Human-readable description of the missing path, including the full
+        dot-notation path that was requested and the segment that failed.
+    """
+
+
 class ConfigValidationError(Exception):
     """Raised when filter_config.yaml is structurally invalid.
 
@@ -119,6 +138,66 @@ def reload_config() -> dict[str, Any]:
     global _config_cache
     _config_cache = None
     return get_config()
+
+
+def load_config() -> dict[str, Any]:
+    """Load and return the validated filter_config.yaml as a nested dict.
+
+    Convenience alias for :func:`get_config`.  Prefer ``get_config`` in new
+    code; ``load_config`` is provided for API consistency with project docs.
+
+    Returns
+    -------
+    dict
+        Full contents of filter_config.yaml (cached after first call).
+
+    Raises
+    ------
+    FileNotFoundError
+        If config/filter_config.yaml does not exist.
+    ConfigValidationError
+        If required sections are missing or soft_score weights don't sum to 1.0.
+    """
+    return get_config()
+
+
+def get_threshold(path: str) -> Any:
+    """Return a config value via a dot-notation key path.
+
+    Parameters
+    ----------
+    path:
+        Dot-separated path into the config dict, e.g.
+        ``"hard_filters.min_avg_roe"`` or ``"soft_scores.roe.weight"``.
+
+    Returns
+    -------
+    Any
+        The value at the specified path.
+
+    Raises
+    ------
+    ConfigError
+        If any segment of *path* is not present in the config.
+
+    Examples
+    --------
+    >>> get_threshold("hard_filters.min_avg_roe")
+    0.15
+    >>> get_threshold("soft_scores.roe.weight")
+    0.15
+    """
+    config = get_config()
+    parts = path.split(".")
+    current: Any = config
+    for part in parts:
+        if not isinstance(current, dict) or part not in current:
+            raise ConfigError(
+                f"Config key not found: '{path}' (failed at segment '{part}'). "
+                "Check config/filter_config.yaml."
+            )
+        current = current[part]
+    return current
 
 
 # ---------------------------------------------------------------------------
