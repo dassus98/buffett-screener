@@ -6,6 +6,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import math
+
+from metrics_engine.leverage import (
+    compute_debt_payoff,
+    compute_debt_to_equity,
+    compute_interest_coverage,
+)
 from metrics_engine.profitability import (
     compute_gross_margin,
     compute_net_margin,
@@ -382,3 +389,247 @@ class TestComputeNetMargin:
         income = _income_df([2020, 2021], [100.0, 200.0], total_revenue=[0.0, 0.0])
         _, summary = compute_net_margin(income)
         assert pd.isna(summary["avg_net_margin"])
+
+
+# ---------------------------------------------------------------------------
+# Leverage builder helpers
+# ---------------------------------------------------------------------------
+
+def _balance_leverage_df(
+    fiscal_years: list[int],
+    long_term_debt: list[float],
+    shareholders_equity: list[float] | None = None,
+) -> pd.DataFrame:
+    """Build a minimal balance sheet DataFrame for leverage tests."""
+    n = len(fiscal_years)
+    return pd.DataFrame({
+        "fiscal_year": fiscal_years,
+        "long_term_debt": long_term_debt,
+        "shareholders_equity": shareholders_equity if shareholders_equity is not None else [500.0] * n,
+    })
+
+
+def _coverage_df(
+    fiscal_years: list[int],
+    interest_expense: list[float],
+    operating_income: list[float],
+) -> pd.DataFrame:
+    """Build a minimal income DataFrame for interest coverage tests."""
+    return pd.DataFrame({
+        "fiscal_year": fiscal_years,
+        "interest_expense": interest_expense,
+        "operating_income": operating_income,
+    })
+
+
+# ===========================================================================
+# Tests — compute_debt_payoff (F5)
+# ===========================================================================
+
+class TestComputeDebtPayoff:
+    def test_basic_four_year_payoff_passes(self):
+        """debt=200, owner_earnings=50 → 4.0 years, pass=True (threshold=5)."""
+        balance = _balance_leverage_df([2022], [200.0])
+        oe = pd.Series({2022: 50.0})
+        annual, summary = compute_debt_payoff(balance, oe)
+        assert annual.iloc[0]["debt_payoff_years"] == pytest.approx(4.0)
+        assert summary["debt_payoff_years"] == pytest.approx(4.0)
+        assert summary["pass"] == True  # noqa: E712
+
+    def test_zero_owner_earnings_produces_inf_and_fails(self):
+        """owner_earnings=0 → debt_payoff=inf → pass=False."""
+        balance = _balance_leverage_df([2022], [200.0])
+        oe = pd.Series({2022: 0.0})
+        annual, summary = compute_debt_payoff(balance, oe)
+        assert math.isinf(annual.iloc[0]["debt_payoff_years"])
+        assert math.isinf(summary["debt_payoff_years"])
+        assert summary["pass"] == False  # noqa: E712
+
+    def test_negative_owner_earnings_produces_inf_and_fails(self):
+        """owner_earnings<0 → debt_payoff=inf → pass=False."""
+        balance = _balance_leverage_df([2022], [200.0])
+        oe = pd.Series({2022: -100.0})
+        _, summary = compute_debt_payoff(balance, oe)
+        assert math.isinf(summary["debt_payoff_years"])
+        assert summary["pass"] == False  # noqa: E712
+
+    def test_zero_debt_produces_zero_years_and_passes(self):
+        """debt=0 → debt_payoff=0.0 → automatic pass."""
+        balance = _balance_leverage_df([2022], [0.0])
+        oe = pd.Series({2022: 50.0})
+        annual, summary = compute_debt_payoff(balance, oe)
+        assert annual.iloc[0]["debt_payoff_years"] == pytest.approx(0.0)
+        assert summary["debt_payoff_years"] == pytest.approx(0.0)
+        assert summary["pass"] == True  # noqa: E712
+
+    def test_payoff_just_over_threshold_fails(self):
+        """6 years payoff > 5-year threshold → pass=False."""
+        balance = _balance_leverage_df([2022], [300.0])
+        oe = pd.Series({2022: 50.0})
+        _, summary = compute_debt_payoff(balance, oe)
+        assert summary["debt_payoff_years"] == pytest.approx(6.0)
+        assert summary["pass"] == False  # noqa: E712
+
+    def test_summary_uses_most_recent_year(self):
+        """Multi-year series: summary reflects the last fiscal year."""
+        balance = _balance_leverage_df([2020, 2021, 2022], [100.0, 150.0, 200.0])
+        oe = pd.Series({2020: 50.0, 2021: 50.0, 2022: 50.0})
+        annual, summary = compute_debt_payoff(balance, oe)
+        # Most recent year: 2022 → 200/50 = 4.0
+        assert summary["debt_payoff_years"] == pytest.approx(4.0)
+        assert annual.loc[annual["fiscal_year"] == 2020, "debt_payoff_years"].iloc[0] == pytest.approx(2.0)
+
+    def test_missing_owner_earnings_year_produces_nan(self):
+        """No owner earnings data for a year → NaN debt_payoff for that row."""
+        balance = _balance_leverage_df([2020, 2021], [100.0, 200.0])
+        oe = pd.Series({2020: 50.0})  # 2021 has no OE data
+        annual, _ = compute_debt_payoff(balance, oe)
+        assert annual.loc[annual["fiscal_year"] == 2020, "debt_payoff_years"].iloc[0] == pytest.approx(2.0)
+        assert pd.isna(annual.loc[annual["fiscal_year"] == 2021, "debt_payoff_years"].iloc[0])
+
+    def test_annual_df_column_names(self):
+        balance = _balance_leverage_df([2022], [100.0])
+        oe = pd.Series({2022: 50.0})
+        annual, _ = compute_debt_payoff(balance, oe)
+        assert set(annual.columns) == {"fiscal_year", "debt_payoff_years"}
+
+
+# ===========================================================================
+# Tests — compute_debt_to_equity (F6)
+# ===========================================================================
+
+class TestComputeDebtToEquity:
+    def test_basic_known_value(self):
+        """D/E = long_term_debt / shareholders_equity."""
+        balance = _balance_leverage_df([2022], [80.0], shareholders_equity=[200.0])
+        annual, _ = compute_debt_to_equity(balance)
+        assert annual.iloc[0]["de_ratio"] == pytest.approx(0.40)
+
+    def test_negative_equity_produces_nan_and_flag(self):
+        """Non-positive equity → D/E = NaN, negative_equity = True."""
+        balance = _balance_leverage_df(
+            [2020, 2021],
+            [100.0, 100.0],
+            shareholders_equity=[-50.0, 500.0],
+        )
+        annual, _ = compute_debt_to_equity(balance)
+        row_2020 = annual.loc[annual["fiscal_year"] == 2020].iloc[0]
+        assert pd.isna(row_2020["de_ratio"])
+        assert row_2020["negative_equity"] == True  # noqa: E712
+
+    def test_positive_equity_not_flagged(self):
+        balance = _balance_leverage_df([2022], [100.0], shareholders_equity=[500.0])
+        annual, _ = compute_debt_to_equity(balance)
+        assert annual.iloc[0]["negative_equity"] == False  # noqa: E712
+
+    def test_zero_debt_produces_zero_de(self):
+        """Zero debt → D/E = 0.0 regardless of equity."""
+        balance = _balance_leverage_df([2022], [0.0], shareholders_equity=[500.0])
+        annual, _ = compute_debt_to_equity(balance)
+        assert annual.iloc[0]["de_ratio"] == pytest.approx(0.0)
+
+    def test_zero_debt_with_negative_equity_still_zero_de(self):
+        """Zero debt → D/E = 0.0 even when equity is negative."""
+        balance = _balance_leverage_df([2022], [0.0], shareholders_equity=[-100.0])
+        annual, _ = compute_debt_to_equity(balance)
+        assert annual.iloc[0]["de_ratio"] == pytest.approx(0.0)
+        assert annual.iloc[0]["negative_equity"] == True  # noqa: E712
+
+    def test_summary_avg_de(self):
+        balance = _balance_leverage_df(
+            [2020, 2021, 2022],
+            [100.0, 120.0, 80.0],
+            shareholders_equity=[500.0, 400.0, 400.0],
+        )
+        _, summary = compute_debt_to_equity(balance)
+        expected_avg = (100 / 500 + 120 / 400 + 80 / 400) / 3
+        assert summary["avg_de_10yr"] == pytest.approx(expected_avg, rel=1e-4)
+
+    def test_summary_max_de(self):
+        balance = _balance_leverage_df(
+            [2020, 2021],
+            [50.0, 200.0],
+            shareholders_equity=[500.0, 400.0],
+        )
+        _, summary = compute_debt_to_equity(balance)
+        assert summary["max_de"] == pytest.approx(200.0 / 400.0)
+
+    def test_summary_latest_de_uses_most_recent_year(self):
+        balance = _balance_leverage_df(
+            [2020, 2021, 2022],
+            [100.0, 200.0, 50.0],
+            shareholders_equity=[500.0, 500.0, 500.0],
+        )
+        _, summary = compute_debt_to_equity(balance)
+        assert summary["latest_de"] == pytest.approx(50.0 / 500.0)
+
+    def test_summary_nan_when_all_negative_equity(self):
+        balance = _balance_leverage_df([2022], [100.0], shareholders_equity=[-50.0])
+        _, summary = compute_debt_to_equity(balance)
+        assert pd.isna(summary["avg_de_10yr"])
+        assert pd.isna(summary["max_de"])
+
+    def test_annual_df_column_names(self):
+        balance = _balance_leverage_df([2022], [100.0])
+        annual, _ = compute_debt_to_equity(balance)
+        assert set(annual.columns) == {"fiscal_year", "de_ratio", "negative_equity"}
+
+
+# ===========================================================================
+# Tests — compute_interest_coverage (F9)
+# ===========================================================================
+
+class TestComputeInterestCoverage:
+    def test_basic_known_value(self):
+        """interest=10, operating_income=100 → interest_pct = 0.10."""
+        income = _coverage_df([2022], [10.0], [100.0])
+        annual, summary = compute_interest_coverage(income)
+        assert annual.iloc[0]["interest_pct_of_ebit"] == pytest.approx(0.10)
+        assert summary["avg_interest_pct_10yr"] == pytest.approx(0.10)
+
+    def test_zero_interest_produces_zero_burden(self):
+        """No interest expense → burden = 0.0."""
+        income = _coverage_df([2022], [0.0], [100.0])
+        annual, _ = compute_interest_coverage(income)
+        assert annual.iloc[0]["interest_pct_of_ebit"] == pytest.approx(0.0)
+
+    def test_negative_ebit_produces_nan(self):
+        """operating_income ≤ 0 → NaN."""
+        income = _coverage_df([2022], [10.0], [-50.0])
+        annual, _ = compute_interest_coverage(income)
+        assert pd.isna(annual.iloc[0]["interest_pct_of_ebit"])
+
+    def test_zero_ebit_produces_nan(self):
+        income = _coverage_df([2022], [10.0], [0.0])
+        annual, _ = compute_interest_coverage(income)
+        assert pd.isna(annual.iloc[0]["interest_pct_of_ebit"])
+
+    def test_summary_avg_excludes_nan_years(self):
+        """NaN year (bad ebit) excluded from average."""
+        income = _coverage_df([2020, 2021], [10.0, 20.0], [-100.0, 200.0])
+        _, summary = compute_interest_coverage(income)
+        # Only 2021 is valid: 20/200 = 0.10
+        assert summary["avg_interest_pct_10yr"] == pytest.approx(0.10)
+
+    def test_summary_avg_multi_year(self):
+        """Average of two valid years."""
+        income = _coverage_df([2020, 2021], [10.0, 20.0], [100.0, 200.0])
+        _, summary = compute_interest_coverage(income)
+        # 2020: 10/100=0.10; 2021: 20/200=0.10 → avg=0.10
+        assert summary["avg_interest_pct_10yr"] == pytest.approx(0.10)
+
+    def test_negative_interest_value_uses_abs(self):
+        """Negative-stored interest_expense is treated as absolute value."""
+        income = _coverage_df([2022], [-10.0], [100.0])
+        annual, _ = compute_interest_coverage(income)
+        assert annual.iloc[0]["interest_pct_of_ebit"] == pytest.approx(0.10)
+
+    def test_all_bad_ebit_produces_nan_avg(self):
+        income = _coverage_df([2020, 2021], [10.0, 10.0], [-50.0, 0.0])
+        _, summary = compute_interest_coverage(income)
+        assert pd.isna(summary["avg_interest_pct_10yr"])
+
+    def test_annual_df_column_names(self):
+        income = _coverage_df([2022], [10.0], [100.0])
+        annual, _ = compute_interest_coverage(income)
+        assert set(annual.columns) == {"fiscal_year", "interest_pct_of_ebit"}
