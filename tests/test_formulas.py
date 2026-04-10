@@ -13,11 +13,16 @@ from metrics_engine.leverage import (
     compute_debt_to_equity,
     compute_interest_coverage,
 )
+from metrics_engine.owner_earnings import compute_owner_earnings
 from metrics_engine.profitability import (
     compute_gross_margin,
     compute_net_margin,
     compute_roe,
     compute_sga_ratio,
+)
+from metrics_engine.returns import (
+    compute_initial_rate_of_return,
+    compute_return_on_retained_earnings,
 )
 from screener.filter_config_loader import ConfigError, get_threshold, load_config
 
@@ -633,3 +638,242 @@ class TestComputeInterestCoverage:
         income = _coverage_df([2022], [10.0], [100.0])
         annual, _ = compute_interest_coverage(income)
         assert set(annual.columns) == {"fiscal_year", "interest_pct_of_ebit"}
+
+
+# ---------------------------------------------------------------------------
+# Owner Earnings / Returns builder helpers
+# ---------------------------------------------------------------------------
+
+def _oe_income(fiscal_years: list[int], net_income: list[float]) -> pd.DataFrame:
+    return pd.DataFrame({"fiscal_year": fiscal_years, "net_income": net_income})
+
+
+def _oe_cashflow(
+    fiscal_years: list[int],
+    da: list[float],
+    capex: list[float],
+    wc_change: list[float] | None = None,
+) -> pd.DataFrame:
+    data: dict = {
+        "fiscal_year": fiscal_years,
+        "depreciation_amortization": da,
+        "capital_expenditures": capex,
+    }
+    if wc_change is not None:
+        data["working_capital_change"] = wc_change
+    return pd.DataFrame(data)
+
+
+_EMPTY_BALANCE = pd.DataFrame()  # balance_df not used by owner_earnings
+
+
+# ===========================================================================
+# Tests — compute_owner_earnings (F1)
+# ===========================================================================
+
+class TestComputeOwnerEarnings:
+    def test_basic_known_value_positive_capex(self):
+        """net_income=100, da=20, capex=30 (positive, sign-corrected) → OE = 90."""
+        income = _oe_income([2022], [100.0])
+        cf = _oe_cashflow([2022], [20.0], [30.0])  # capex positive → sign-corrected to -30
+        annual, _ = compute_owner_earnings(income, cf, _EMPTY_BALANCE)
+        assert annual.iloc[0]["owner_earnings"] == pytest.approx(90.0)
+
+    def test_basic_known_value_negative_capex(self):
+        """capex already negative (schema convention) → same OE = 90."""
+        income = _oe_income([2022], [100.0])
+        cf = _oe_cashflow([2022], [20.0], [-30.0])  # capex = -30, no sign correction
+        annual, _ = compute_owner_earnings(income, cf, _EMPTY_BALANCE)
+        assert annual.iloc[0]["owner_earnings"] == pytest.approx(90.0)
+
+    def test_high_capex_flag_triggered(self):
+        """capex=50, da=20 → ratio=2.5 > 2.0 → high_capex_flag=True."""
+        income = _oe_income([2022], [100.0])
+        cf = _oe_cashflow([2022], [20.0], [50.0])
+        _, summary = compute_owner_earnings(income, cf, _EMPTY_BALANCE)
+        assert summary["high_capex_flag"] == True  # noqa: E712
+
+    def test_high_capex_flag_not_triggered(self):
+        """capex=30, da=20 → ratio=1.5 ≤ 2.0 → high_capex_flag=False."""
+        income = _oe_income([2022], [100.0])
+        cf = _oe_cashflow([2022], [20.0], [30.0])
+        _, summary = compute_owner_earnings(income, cf, _EMPTY_BALANCE)
+        assert summary["high_capex_flag"] == False  # noqa: E712
+
+    def test_high_capex_flag_exactly_at_threshold_not_triggered(self):
+        """capex = 2× da exactly → ratio=2.0, NOT > 2.0 → flag=False."""
+        income = _oe_income([2022], [100.0])
+        cf = _oe_cashflow([2022], [20.0], [40.0])  # 40/20 = 2.0, not > 2.0
+        _, summary = compute_owner_earnings(income, cf, _EMPTY_BALANCE)
+        assert summary["high_capex_flag"] == False  # noqa: E712
+
+    def test_missing_da_produces_nan_oe(self):
+        """NaN D&A → OE = NaN for that year."""
+        income = _oe_income([2022], [100.0])
+        cf = pd.DataFrame({
+            "fiscal_year": [2022],
+            "depreciation_amortization": [float("nan")],
+            "capital_expenditures": [-30.0],
+        })
+        annual, _ = compute_owner_earnings(income, cf, _EMPTY_BALANCE)
+        assert pd.isna(annual.iloc[0]["owner_earnings"])
+
+    def test_negative_oe_is_valid(self):
+        """OE can be negative; it means the business consumed capital."""
+        income = _oe_income([2022], [-200.0])
+        cf = _oe_cashflow([2022], [20.0], [30.0])
+        annual, _ = compute_owner_earnings(income, cf, _EMPTY_BALANCE)
+        # OE = -200 + 20 - 30 = -210
+        assert annual.iloc[0]["owner_earnings"] == pytest.approx(-210.0)
+
+    def test_wc_change_tracked_not_deducted(self):
+        """wc_change is recorded in annual_df but does NOT alter owner_earnings."""
+        income = _oe_income([2022], [100.0])
+        cf = _oe_cashflow([2022], [20.0], [30.0], wc_change=[15.0])
+        annual, _ = compute_owner_earnings(income, cf, _EMPTY_BALANCE)
+        # OE = 100 + 20 - 30 = 90 (wc_change not deducted)
+        assert annual.iloc[0]["owner_earnings"] == pytest.approx(90.0)
+        assert annual.iloc[0]["wc_change"] == pytest.approx(15.0)
+
+    def test_summary_avg_owner_earnings(self):
+        """avg_owner_earnings_10yr is the mean of valid annual OE values."""
+        income = _oe_income([2020, 2021, 2022], [100.0, 110.0, 120.0])
+        cf = _oe_cashflow([2020, 2021, 2022], [20.0, 20.0, 20.0], [30.0, 30.0, 30.0])
+        # OE = [90, 100, 110] → avg = 100
+        _, summary = compute_owner_earnings(income, cf, _EMPTY_BALANCE)
+        assert summary["avg_owner_earnings_10yr"] == pytest.approx(100.0)
+
+    def test_summary_cagr_multi_year(self):
+        """owner_earnings_cagr: OE grows from 90 to 110 over 3 years."""
+        income = _oe_income([2020, 2021, 2022], [100.0, 110.0, 120.0])
+        cf = _oe_cashflow([2020, 2021, 2022], [20.0, 20.0, 20.0], [30.0, 30.0, 30.0])
+        # OE: 90, 100, 110 → CAGR = (110/90)^(1/2) - 1
+        _, summary = compute_owner_earnings(income, cf, _EMPTY_BALANCE)
+        expected_cagr = (110.0 / 90.0) ** 0.5 - 1.0
+        assert summary["owner_earnings_cagr"] == pytest.approx(expected_cagr, rel=1e-4)
+
+    def test_summary_cagr_single_year_is_nan(self):
+        income = _oe_income([2022], [100.0])
+        cf = _oe_cashflow([2022], [20.0], [30.0])
+        _, summary = compute_owner_earnings(income, cf, _EMPTY_BALANCE)
+        assert pd.isna(summary["owner_earnings_cagr"])
+
+    def test_annual_df_column_names(self):
+        income = _oe_income([2022], [100.0])
+        cf = _oe_cashflow([2022], [20.0], [30.0])
+        annual, _ = compute_owner_earnings(income, cf, _EMPTY_BALANCE)
+        expected = {"fiscal_year", "owner_earnings", "net_income", "da", "capex", "wc_change", "capex_to_da_ratio"}
+        assert set(annual.columns) == expected
+
+
+# ===========================================================================
+# Tests — compute_initial_rate_of_return (F2)
+# ===========================================================================
+
+class TestComputeInitialRateOfReturn:
+    def test_basic_known_value(self):
+        """OE_per_share=5, price=50 → initial_return = 0.10."""
+        result = compute_initial_rate_of_return(
+            owner_earnings_per_share=5.0,
+            current_price=50.0,
+            risk_free_rate=0.04,
+        )
+        assert result["initial_return"] == pytest.approx(0.10)
+
+    def test_passes_2x_test_when_above_threshold(self):
+        """0.10 ≥ 2 × 0.04 = 0.08 → passes_2x_test = True."""
+        result = compute_initial_rate_of_return(5.0, 50.0, risk_free_rate=0.04)
+        assert result["passes_2x_test"] == True  # noqa: E712
+
+    def test_fails_2x_test_when_below_threshold(self):
+        """0.10 < 2 × 0.06 = 0.12 → passes_2x_test = False."""
+        result = compute_initial_rate_of_return(5.0, 50.0, risk_free_rate=0.06)
+        assert result["passes_2x_test"] == False  # noqa: E712
+
+    def test_vs_bond_yield_spread(self):
+        """vs_bond_yield = initial_return − risk_free_rate."""
+        result = compute_initial_rate_of_return(5.0, 50.0, risk_free_rate=0.04)
+        assert result["vs_bond_yield"] == pytest.approx(0.10 - 0.04)
+
+    def test_zero_price_returns_nan(self):
+        result = compute_initial_rate_of_return(5.0, current_price=0.0, risk_free_rate=0.04)
+        assert pd.isna(result["initial_return"])
+        assert result["passes_2x_test"] == False  # noqa: E712
+
+    def test_negative_price_returns_nan(self):
+        result = compute_initial_rate_of_return(5.0, current_price=-10.0, risk_free_rate=0.04)
+        assert pd.isna(result["initial_return"])
+
+    def test_negative_oe_per_share_computes_negative_return(self):
+        """Negative OE → negative return → automatic fail (no crash)."""
+        result = compute_initial_rate_of_return(-5.0, 50.0, risk_free_rate=0.04)
+        assert result["initial_return"] == pytest.approx(-0.10)
+        assert result["passes_2x_test"] == False  # noqa: E712
+
+    def test_return_dict_keys_present(self):
+        result = compute_initial_rate_of_return(5.0, 50.0, 0.04)
+        assert set(result.keys()) == {"initial_return", "vs_bond_yield", "passes_2x_test"}
+
+
+# ===========================================================================
+# Tests — compute_return_on_retained_earnings (F4)
+# ===========================================================================
+
+class TestComputeReturnOnRetainedEarnings:
+    def test_basic_known_values(self):
+        """eps=[2,2.5,3,3.5,4], divs=[0.5]*5 → cumulative=12.5, growth=2, return=0.16."""
+        eps = pd.Series([2.0, 2.5, 3.0, 3.5, 4.0])
+        dps = pd.Series([0.5, 0.5, 0.5, 0.5, 0.5])
+        result = compute_return_on_retained_earnings(eps, dps)
+        assert result["cumulative_retained_per_share"] == pytest.approx(12.5)
+        assert result["eps_growth"] == pytest.approx(2.0)
+        assert result["return_on_retained"] == pytest.approx(0.16)
+        assert result["meaningful"] == True  # noqa: E712
+
+    def test_no_dividends_retains_all_eps(self):
+        """Zero dividends → retained = eps for each year."""
+        eps = pd.Series([1.0, 2.0, 3.0])
+        dps = pd.Series([0.0, 0.0, 0.0])
+        result = compute_return_on_retained_earnings(eps, dps)
+        assert result["cumulative_retained_per_share"] == pytest.approx(6.0)
+        assert result["eps_growth"] == pytest.approx(2.0)
+        assert result["return_on_retained"] == pytest.approx(2.0 / 6.0)
+
+    def test_cumulative_retained_zero_is_not_meaningful(self):
+        """Paid out exactly as much as earned → cumulative ≤ 0 → NaN."""
+        eps = pd.Series([2.0, 2.0])
+        dps = pd.Series([2.0, 2.0])  # retained = 0 each year
+        result = compute_return_on_retained_earnings(eps, dps)
+        assert pd.isna(result["return_on_retained"])
+        assert result["meaningful"] == False  # noqa: E712
+        assert result["cumulative_retained_per_share"] == pytest.approx(0.0)
+
+    def test_cumulative_retained_negative_is_not_meaningful(self):
+        """Paid out more than earned → cumulative < 0 → NaN."""
+        eps = pd.Series([1.0, 1.0])
+        dps = pd.Series([2.0, 2.0])  # retained = -1 each year
+        result = compute_return_on_retained_earnings(eps, dps)
+        assert pd.isna(result["return_on_retained"])
+        assert result["meaningful"] == False  # noqa: E712
+
+    def test_eps_growth_uses_first_and_last(self):
+        """eps_growth = eps_latest - eps_earliest regardless of middle values."""
+        eps = pd.Series([2.0, 10.0, 4.0])  # first=2, last=4
+        dps = pd.Series([0.0, 0.0, 0.0])
+        result = compute_return_on_retained_earnings(eps, dps)
+        assert result["eps_growth"] == pytest.approx(2.0)  # 4 - 2
+
+    def test_single_year_eps_growth_is_nan(self):
+        """Cannot compute growth with only one year."""
+        eps = pd.Series([3.0])
+        dps = pd.Series([0.5])
+        result = compute_return_on_retained_earnings(eps, dps)
+        assert pd.isna(result["eps_growth"])
+
+    def test_return_dict_keys_present(self):
+        eps = pd.Series([2.0, 4.0])
+        dps = pd.Series([0.5, 0.5])
+        result = compute_return_on_retained_earnings(eps, dps)
+        assert set(result.keys()) == {
+            "return_on_retained", "cumulative_retained_per_share", "eps_growth", "meaningful"
+        }
