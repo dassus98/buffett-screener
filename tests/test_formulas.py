@@ -25,6 +25,8 @@ from metrics_engine.returns import (
     compute_return_on_retained_earnings,
 )
 from screener.filter_config_loader import ConfigError, get_threshold, load_config
+from metrics_engine.growth import compute_buyback_indicator, compute_eps_cagr
+from metrics_engine.capex import compute_capex_to_earnings
 
 
 # ---------------------------------------------------------------------------
@@ -877,3 +879,167 @@ class TestComputeReturnOnRetainedEarnings:
         assert set(result.keys()) == {
             "return_on_retained", "cumulative_retained_per_share", "eps_growth", "meaningful"
         }
+
+
+# ===========================================================================
+# Tests — compute_eps_cagr (F11)
+# ===========================================================================
+
+class TestComputeEpsCagr:
+    def test_basic_known_value(self):
+        """EPS from 2.0 to 4.0 over 10 years → (4/2)^(1/10) − 1 ≈ 7.18%.
+
+        Five positive years span 2014–2024 (n_years = 2024 − 2014 = 10).
+        """
+        eps = pd.Series([2.0, 2.5, 3.0, 3.5, 4.0],
+                        index=[2014, 2017, 2019, 2021, 2024])
+        result = compute_eps_cagr(eps)
+        assert result["eps_cagr"] == pytest.approx(2.0 ** (1 / 10) - 1, rel=1e-4)
+        assert result["base_year"] == 2014
+        assert result["base_eps"] == pytest.approx(2.0)
+        assert result["current_eps"] == pytest.approx(4.0)
+
+    def test_negative_base_uses_first_positive_year(self):
+        """Earliest EPS ≤ 0 → base shifts to first positive year; exponent adjusted."""
+        # years 2016–2022; first two are negative → base = 2018 (eps=2.0)
+        # n_years = 2022 − 2018 = 4 → CAGR = (4/2)^(1/4) − 1
+        eps = pd.Series([-1.0, -0.5, 2.0, 2.5, 3.0, 3.5, 4.0],
+                        index=[2016, 2017, 2018, 2019, 2020, 2021, 2022])
+        result = compute_eps_cagr(eps)
+        assert result["base_year"] == 2018
+        assert result["base_eps"] == pytest.approx(2.0)
+        expected = (4.0 / 2.0) ** (1 / 4) - 1
+        assert result["eps_cagr"] == pytest.approx(expected, rel=1e-4)
+
+    def test_fewer_than_5_positive_years_returns_nan(self):
+        """Only 3 positive EPS years → CAGR = NaN (flagged for drop)."""
+        eps = pd.Series([-1.0, -2.0, 1.0, 2.0, 3.0, -4.0],
+                        index=[2017, 2018, 2019, 2020, 2021, 2022])
+        result = compute_eps_cagr(eps)
+        assert math.isnan(result["eps_cagr"])
+
+    def test_decline_years_counted_correctly(self):
+        """EPS sequence [3,2,4,3,5] has 2 year-over-year declines."""
+        eps = pd.Series([3.0, 2.0, 4.0, 3.0, 5.0],
+                        index=[2018, 2019, 2020, 2021, 2022])
+        result = compute_eps_cagr(eps)
+        assert result["decline_years"] == 2
+
+    def test_current_eps_zero_returns_nan(self):
+        """Current (most-recent) EPS = 0 → automatic fail, CAGR = NaN."""
+        eps = pd.Series([2.0, 3.0, 4.0, 5.0, 6.0, 0.0],
+                        index=[2017, 2018, 2019, 2020, 2021, 2022])
+        result = compute_eps_cagr(eps)
+        assert math.isnan(result["eps_cagr"])
+
+    def test_result_dict_keys_present(self):
+        eps = pd.Series([2.0, 4.0], index=[2014, 2024])
+        result = compute_eps_cagr(eps)
+        assert set(result.keys()) == {
+            "eps_cagr", "decline_years", "base_year", "base_eps", "current_eps"
+        }
+
+    def test_no_decline_years_all_growing(self):
+        """Monotonically increasing EPS → 0 decline years."""
+        eps = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0], index=[2018, 2019, 2020, 2021, 2022])
+        result = compute_eps_cagr(eps)
+        assert result["decline_years"] == 0
+
+
+# ===========================================================================
+# Tests — compute_buyback_indicator (F13)
+# ===========================================================================
+
+class TestComputeBuybackIndicator:
+    def test_shares_reduced(self):
+        """Shares fell from 1000 to 900 → buyback_pct = 0.10, reduced = True."""
+        shares = pd.Series([1000.0, 900.0], index=[2014, 2024])
+        result = compute_buyback_indicator(shares)
+        assert result["buyback_pct"] == pytest.approx(0.10)
+        assert result["shares_reduced"] is True
+        assert result["shares_10yr_ago"] == pytest.approx(1000.0)
+        assert result["shares_current"] == pytest.approx(900.0)
+
+    def test_shares_increased_dilution(self):
+        """Shares grew from 1000 to 1100 → buyback_pct = −0.10, reduced = False."""
+        shares = pd.Series([1000.0, 1100.0], index=[2014, 2024])
+        result = compute_buyback_indicator(shares)
+        assert result["buyback_pct"] == pytest.approx(-0.10)
+        assert result["shares_reduced"] is False
+
+    def test_shares_unchanged(self):
+        """Constant share count → buyback_pct = 0.0, reduced = False."""
+        shares = pd.Series([500.0, 500.0], index=[2014, 2024])
+        result = compute_buyback_indicator(shares)
+        assert result["buyback_pct"] == pytest.approx(0.0)
+        assert result["shares_reduced"] is False  # 0.0 > 0 is False
+
+    def test_single_data_point_returns_nan(self):
+        """Fewer than 2 data points → NaN, not reduced."""
+        shares = pd.Series([1000.0], index=[2024])
+        result = compute_buyback_indicator(shares)
+        assert math.isnan(result["buyback_pct"])
+        assert result["shares_reduced"] is False
+
+    def test_result_dict_keys_present(self):
+        shares = pd.Series([1000.0, 900.0], index=[2014, 2024])
+        result = compute_buyback_indicator(shares)
+        assert set(result.keys()) == {
+            "buyback_pct", "shares_reduced", "shares_10yr_ago", "shares_current"
+        }
+
+
+# ===========================================================================
+# Tests — compute_capex_to_earnings (F12)
+# ===========================================================================
+
+class TestComputeCapexToEarnings:
+    def test_basic_average_known_value(self):
+        """capex=[−25,−30,−20], ni=[100,100,100] → avg = (0.25+0.30+0.20)/3 = 0.25."""
+        capex = pd.Series([-25.0, -30.0, -20.0])
+        ni = pd.Series([100.0, 100.0, 100.0])
+        result = compute_capex_to_earnings(capex, ni)
+        assert result["avg_capex_to_ni"] == pytest.approx(0.25)
+        assert result["years_included"] == 3
+        assert result["years_excluded"] == 0
+
+    def test_zero_ni_year_excluded(self):
+        """Year with ni=0 is excluded; average is computed over the other 2 years."""
+        # included: years 0 and 2 only → (25/100 + 20/100) / 2 = 0.225
+        capex = pd.Series([-25.0, -30.0, -20.0])
+        ni = pd.Series([100.0, 0.0, 100.0])
+        result = compute_capex_to_earnings(capex, ni)
+        assert result["avg_capex_to_ni"] == pytest.approx(0.225)
+        assert result["years_included"] == 2
+        assert result["years_excluded"] == 1
+
+    def test_all_negative_ni_returns_nan(self):
+        """All net income ≤ 0 → avg_capex_to_ni = NaN, years_included = 0."""
+        capex = pd.Series([-25.0, -30.0])
+        ni = pd.Series([0.0, -10.0])
+        result = compute_capex_to_earnings(capex, ni)
+        assert math.isnan(result["avg_capex_to_ni"])
+        assert result["years_included"] == 0
+        assert result["years_excluded"] == 2
+
+    def test_positive_capex_sign_handled_by_abs(self):
+        """CapEx with positive sign (data-source error) is handled via abs()."""
+        capex = pd.Series([25.0, 30.0])   # should be negative but source returned positive
+        ni = pd.Series([100.0, 100.0])
+        result = compute_capex_to_earnings(capex, ni)
+        # (25/100 + 30/100) / 2 = 0.275
+        assert result["avg_capex_to_ni"] == pytest.approx(0.275)
+
+    def test_zero_capex_gives_zero_ratio(self):
+        """CapEx = 0 (software/service business) → ratio = 0.0, valid."""
+        capex = pd.Series([0.0, 0.0])
+        ni = pd.Series([100.0, 100.0])
+        result = compute_capex_to_earnings(capex, ni)
+        assert result["avg_capex_to_ni"] == pytest.approx(0.0)
+        assert result["years_included"] == 2
+
+    def test_result_dict_keys_present(self):
+        capex = pd.Series([-25.0])
+        ni = pd.Series([100.0])
+        result = compute_capex_to_earnings(capex, ni)
+        assert set(result.keys()) == {"avg_capex_to_ni", "years_included", "years_excluded"}
