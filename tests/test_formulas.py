@@ -32,6 +32,11 @@ from metrics_engine.valuation import (
     compute_intrinsic_value,
     compute_margin_of_safety,
 )
+from metrics_engine.composite_score import (
+    compute_all_composite_scores,
+    compute_composite_score,
+    score_criterion,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1248,3 +1253,263 @@ class TestComputeEarningsYield:
         assert set(result.keys()) == {
             "earnings_yield", "bond_yield", "spread", "equities_attractive"
         }
+
+
+# ===========================================================================
+# Tests — score_criterion (composite_score.py)
+# ===========================================================================
+
+class TestScoreCriterion:
+    def test_breakpoints_midpoint_linear_interpolation(self):
+        """value=0.30 between {0.20:0, 0.40:70} → ratio=0.5 → score=35.0."""
+        cfg = {"breakpoints": {"0.20": 0, "0.40": 70, "0.60": 100}}
+        assert score_criterion(0.30, cfg) == pytest.approx(35.0)
+
+    def test_breakpoints_exact_lower_boundary(self):
+        """value exactly at lowest breakpoint → score = that breakpoint's value."""
+        cfg = {"breakpoints": {"0.20": 0, "0.40": 70, "0.60": 100}}
+        assert score_criterion(0.20, cfg) == pytest.approx(0.0)
+
+    def test_breakpoints_exact_upper_boundary(self):
+        """value exactly at highest breakpoint → score = that breakpoint's value."""
+        cfg = {"breakpoints": {"0.20": 0, "0.40": 70, "0.60": 100}}
+        assert score_criterion(0.60, cfg) == pytest.approx(100.0)
+
+    def test_breakpoints_above_max_clamped_to_100(self):
+        """value above highest breakpoint → clamped to 100."""
+        cfg = {"breakpoints": {"0.20": 0, "0.40": 70, "0.60": 100}}
+        assert score_criterion(0.90, cfg) == pytest.approx(100.0)
+
+    def test_breakpoints_below_min_clamped_to_0(self):
+        """value below lowest breakpoint → clamped to that boundary score (0)."""
+        cfg = {"breakpoints": {"0.20": 0, "0.40": 70, "0.60": 100}}
+        assert score_criterion(0.10, cfg) == pytest.approx(0.0)
+
+    def test_floor_ceiling_midpoint(self):
+        """value=0.20, floor=0.15 (→50), ceiling=0.25 (→100) → midpoint → 75.0."""
+        cfg = {"score_floor_value": 0.15, "score_ceiling_value": 0.25}
+        assert score_criterion(0.20, cfg) == pytest.approx(75.0)
+
+    def test_floor_ceiling_at_floor_value(self):
+        """value exactly at floor → score = 50."""
+        cfg = {"score_floor_value": 0.15, "score_ceiling_value": 0.25}
+        assert score_criterion(0.15, cfg) == pytest.approx(50.0)
+
+    def test_floor_ceiling_at_ceiling_value(self):
+        """value exactly at ceiling → score = 100."""
+        cfg = {"score_floor_value": 0.15, "score_ceiling_value": 0.25}
+        assert score_criterion(0.25, cfg) == pytest.approx(100.0)
+
+    def test_nan_returns_zero(self):
+        """NaN value → score = 0.0 regardless of config."""
+        cfg = {"breakpoints": {"0.20": 0, "0.40": 70, "0.60": 100}}
+        assert score_criterion(float("nan"), cfg) == pytest.approx(0.0)
+
+    def test_none_returns_zero(self):
+        """None value (treated as NaN by pd.isna) → score = 0.0."""
+        cfg = {"breakpoints": {"0.20": 0, "0.40": 70, "0.60": 100}}
+        assert score_criterion(None, cfg) == pytest.approx(0.0)
+
+    def test_unrecognized_config_returns_zero(self):
+        """Config without known keys → score = 0.0."""
+        assert score_criterion(0.50, {"unknown_key": 99}) == pytest.approx(0.0)
+
+    def test_score_clamped_above_100(self):
+        """Score produced by interpolation is clamped to [0, 100] upper bound."""
+        # breakpoint ceiling score is 100, value above → still 100
+        cfg = {"breakpoints": {"0.00": 0, "0.50": 100}}
+        assert score_criterion(1.00, cfg) <= 100.0
+
+    def test_score_clamped_below_0(self):
+        """Score is never negative."""
+        cfg = {"breakpoints": {"0.00": 0, "0.50": 100}}
+        assert score_criterion(-1.00, cfg) >= 0.0
+
+    def test_string_breakpoint_keys_converted_correctly(self):
+        """YAML string keys like '-0.05' are converted to float."""
+        cfg = {
+            "breakpoints": {
+                "-0.05": 0,
+                "0.00": 20,
+                "0.05": 40,
+                "0.10": 70,
+                "0.15": 100,
+            }
+        }
+        # value=0.10 is exactly at the 70-score breakpoint
+        assert score_criterion(0.10, cfg) == pytest.approx(70.0)
+
+
+# ===========================================================================
+# Tests — compute_composite_score (composite_score.py)
+# ===========================================================================
+
+def _mock_summary() -> dict:
+    """Full metrics_summary dict with a known hand-calculated composite score of 57.0.
+
+    Breakdown (score × weight → contribution):
+      roe:                    75.0 × 0.15 = 11.25  (avg_roe=0.20, no stdev penalty)
+      gross_margin:           70.0 × 0.10 =  7.00  (avg_gross_margin=0.40 at breakpoint)
+      sga_ratio:               0.0 × 0.08 =  0.00  (NaN → 0)
+      eps_growth:             75.0 × 0.15 = 11.25  (cagr=0.15, 0 declines → mult 1.0)
+      debt_conservatism:     100.0 × 0.10 = 10.00  (avg_de=0.20 = excellent)
+      owner_earnings_growth:   0.0 × 0.12 =  0.00  (NaN → 0)
+      capital_efficiency:      0.0 × 0.08 =  0.00  (NaN → 0)
+      buyback:                70.0 × 0.05 =  3.50  (buyback_pct=0.10 at breakpoint 70)
+      retained_earnings_return: 70.0 × 0.10 = 7.00  (return_on_retained=0.12 = good)
+      interest_coverage:     100.0 × 0.07 =  7.00  (avg_interest_pct_10yr=0.05 < excellent)
+      ─────────────────────────────────────────────
+      Total:                                 57.00
+    """
+    return {
+        "avg_roe": 0.20,
+        "roe_stdev": float("nan"),
+        "avg_gross_margin": 0.40,
+        "avg_sga_ratio": float("nan"),
+        "eps_cagr": 0.15,
+        "decline_years": 0,
+        "avg_de_10yr": 0.20,
+        "owner_earnings_cagr": float("nan"),
+        "avg_capex_to_ni": float("nan"),
+        "buyback_pct": 0.10,
+        "return_on_retained": 0.12,
+        "avg_interest_pct_10yr": 0.05,
+    }
+
+
+class TestComputeCompositeScore:
+    def test_known_weighted_sum(self):
+        """Hand-calculated expected composite = 57.0 for _mock_summary()."""
+        result = compute_composite_score(_mock_summary())
+        assert result["composite_score"] == pytest.approx(57.0, abs=0.5)
+
+    def test_result_has_composite_score_key(self):
+        result = compute_composite_score(_mock_summary())
+        assert "composite_score" in result
+
+    def test_result_has_scores_detail_key(self):
+        result = compute_composite_score(_mock_summary())
+        assert "scores_detail" in result
+
+    def test_scores_detail_has_ten_criteria(self):
+        result = compute_composite_score(_mock_summary())
+        assert len(result["scores_detail"]) == 10
+
+    def test_scores_detail_criterion_names(self):
+        result = compute_composite_score(_mock_summary())
+        expected_keys = {
+            "roe", "gross_margin", "sga_ratio", "eps_growth",
+            "debt_conservatism", "owner_earnings_growth", "capital_efficiency",
+            "buyback", "retained_earnings_return", "interest_coverage",
+        }
+        assert set(result["scores_detail"].keys()) == expected_keys
+
+    def test_each_criterion_has_required_fields(self):
+        result = compute_composite_score(_mock_summary())
+        for name, d in result["scores_detail"].items():
+            assert "score" in d, f"missing 'score' for {name}"
+            assert "weight" in d, f"missing 'weight' for {name}"
+            assert "raw_value" in d, f"missing 'raw_value' for {name}"
+
+    def test_all_nan_summary_composite_is_zero(self):
+        """When every metric is NaN all criterion scores are 0 → composite = 0."""
+        nan_summary = {k: float("nan") for k in _mock_summary()}
+        result = compute_composite_score(nan_summary)
+        assert result["composite_score"] == pytest.approx(0.0)
+
+    def test_composite_score_within_0_100(self):
+        result = compute_composite_score(_mock_summary())
+        assert 0.0 <= result["composite_score"] <= 100.0
+
+    def test_individual_scores_within_0_100(self):
+        result = compute_composite_score(_mock_summary())
+        for name, d in result["scores_detail"].items():
+            assert 0.0 <= d["score"] <= 100.0, f"score out of range for {name}"
+
+    def test_roe_score_present_in_detail(self):
+        """Spot-check: ROE criterion score should be 75.0 for avg_roe=0.20."""
+        result = compute_composite_score(_mock_summary())
+        assert result["scores_detail"]["roe"]["score"] == pytest.approx(75.0, abs=0.5)
+
+    def test_interest_coverage_score_100_below_excellent(self):
+        """avg_interest_pct_10yr=0.05 < excellent=0.10 → score = 100."""
+        result = compute_composite_score(_mock_summary())
+        assert result["scores_detail"]["interest_coverage"]["score"] == pytest.approx(100.0)
+
+    def test_empty_summary_returns_zero_composite(self):
+        """Empty dict → all metrics missing → composite = 0."""
+        result = compute_composite_score({})
+        assert result["composite_score"] == pytest.approx(0.0)
+
+
+# ===========================================================================
+# Tests — weights sum to 1.0 (config integrity)
+# ===========================================================================
+
+class TestWeightsSumToOne:
+    def test_soft_score_weights_sum_to_one(self):
+        """All 10 soft-score weights must sum to exactly 1.0 (enforced by config loader)."""
+        from screener.filter_config_loader import get_config
+        cfg = get_config()
+        ss = cfg.get("soft_scores", {})
+        total = sum(float(v.get("weight", 0.0)) for v in ss.values() if isinstance(v, dict))
+        assert total == pytest.approx(1.0, abs=1e-9)
+
+
+# ===========================================================================
+# Tests — compute_all_composite_scores (composite_score.py)
+# ===========================================================================
+
+class TestComputeAllCompositeScores:
+    def test_returns_dataframe(self):
+        result = compute_all_composite_scores({"AAPL": _mock_summary()})
+        assert isinstance(result, pd.DataFrame)
+
+    def test_empty_dict_returns_empty_dataframe(self):
+        result = compute_all_composite_scores({})
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 0
+
+    def test_row_count_matches_ticker_count(self):
+        all_metrics = {"AAPL": _mock_summary(), "KO": _mock_summary()}
+        result = compute_all_composite_scores(all_metrics)
+        assert len(result) == 2
+
+    def test_sorted_descending_by_composite_score(self):
+        """Ticker with higher composite score should appear first."""
+        high = {**_mock_summary(), "avg_roe": 0.30}   # more ROE → higher score
+        low = {**_mock_summary(), "avg_roe": 0.15}    # lower ROE → lower score
+        result = compute_all_composite_scores({"LOW": low, "HIGH": high})
+        assert result.iloc[0]["ticker"] == "HIGH"
+        assert result.iloc[1]["ticker"] == "LOW"
+
+    def test_ticker_column_present(self):
+        result = compute_all_composite_scores({"AAPL": _mock_summary()})
+        assert "ticker" in result.columns
+
+    def test_composite_score_column_present(self):
+        result = compute_all_composite_scores({"AAPL": _mock_summary()})
+        assert "composite_score" in result.columns
+
+    def test_score_columns_for_all_criteria(self):
+        """DataFrame must include score_{criterion} for all 10 soft criteria."""
+        result = compute_all_composite_scores({"AAPL": _mock_summary()})
+        expected_cols = {
+            "score_roe", "score_gross_margin", "score_sga_ratio", "score_eps_growth",
+            "score_debt_conservatism", "score_owner_earnings_growth",
+            "score_capital_efficiency", "score_buyback",
+            "score_retained_earnings_return", "score_interest_coverage",
+        }
+        assert expected_cols.issubset(set(result.columns))
+
+    def test_composite_score_values_within_range(self):
+        all_metrics = {"AAPL": _mock_summary(), "KO": _mock_summary()}
+        result = compute_all_composite_scores(all_metrics)
+        assert (result["composite_score"] >= 0.0).all()
+        assert (result["composite_score"] <= 100.0).all()
+
+    def test_index_reset_after_sort(self):
+        """Index must be reset 0-based after sort."""
+        all_metrics = {t: _mock_summary() for t in ["A", "B", "C"]}
+        result = compute_all_composite_scores(all_metrics)
+        assert list(result.index) == list(range(len(result)))
