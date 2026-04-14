@@ -27,6 +27,11 @@ from metrics_engine.returns import (
 from screener.filter_config_loader import ConfigError, get_threshold, load_config
 from metrics_engine.growth import compute_buyback_indicator, compute_eps_cagr
 from metrics_engine.capex import compute_capex_to_earnings
+from metrics_engine.valuation import (
+    compute_earnings_yield,
+    compute_intrinsic_value,
+    compute_margin_of_safety,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1043,3 +1048,203 @@ class TestComputeCapexToEarnings:
         ni = pd.Series([100.0])
         result = compute_capex_to_earnings(capex, ni)
         assert set(result.keys()) == {"avg_capex_to_ni", "years_included", "years_excluded"}
+
+
+# ===========================================================================
+# Shared fixture for valuation tests
+# ===========================================================================
+
+def _make_pe_series() -> pd.Series:
+    """10-year P/E series with mean=15.3, median=15.0 (used across F14 tests)."""
+    return pd.Series([15, 16, 17, 14, 15, 16, 15, 14, 16, 15], dtype=float)
+
+
+# ===========================================================================
+# Tests — compute_intrinsic_value (F14)
+# ===========================================================================
+
+class TestComputeIntrinsicValue:
+    # ------------------------------------------------------------------
+    # Hand-calculated reference case
+    #   current_eps=5, eps_cagr=0.10, PE as above, price=100, rfr=0.04
+    #
+    #   PE resolution  : mean=15.3, median=15.0
+    #     bear_pe = min(15.3, 12) = 12.0
+    #     base_pe = 15.0
+    #     bull_pe = max(15.3, 20) = 20.0
+    #
+    #   Growth rates   : bear=0.05, base=0.10, bull=0.13
+    #
+    #   Bear  : proj_eps=5*(1.05)^10=8.144, proj_price=97.73,
+    #           pv=97.73/(1.09)^10 ≈ 41.28
+    #   Base  : proj_eps=5*(1.10)^10=12.97, proj_price=194.53,
+    #           pv=194.53/(1.07)^10 ≈ 98.89
+    #   Bull  : proj_eps=5*(1.13)^10=16.97, proj_price=339.46,
+    #           pv=339.46/(1.06)^10 ≈ 189.56
+    #   Weighted IV = 0.25*41.28 + 0.50*98.89 + 0.25*189.56 ≈ 107.15
+    # ------------------------------------------------------------------
+
+    def test_bear_pv_less_than_base_less_than_bull(self):
+        """Bear PV < Base PV < Bull PV (conservatism ordering)."""
+        result = compute_intrinsic_value(5.0, 0.10, _make_pe_series(), 100.0, 0.04)
+        assert result["bear"]["present_value"] < result["base"]["present_value"]
+        assert result["base"]["present_value"] < result["bull"]["present_value"]
+
+    def test_weighted_iv_between_bear_and_bull(self):
+        """weighted_iv must lie strictly between bear and bull present values."""
+        result = compute_intrinsic_value(5.0, 0.10, _make_pe_series(), 100.0, 0.04)
+        assert result["bear"]["present_value"] < result["weighted_iv"]
+        assert result["weighted_iv"] < result["bull"]["present_value"]
+
+    def test_weighted_iv_approx_known_value(self):
+        """Hand-computed weighted IV ≈ 107.15 (±0.50 tolerance for floating point)."""
+        result = compute_intrinsic_value(5.0, 0.10, _make_pe_series(), 100.0, 0.04)
+        assert result["weighted_iv"] == pytest.approx(107.15, abs=0.50)
+
+    def test_bear_pe_capped_at_config_cap(self):
+        """Bear terminal P/E = min(mean_pe, pe_cap=12) → 12 when mean > 12."""
+        result = compute_intrinsic_value(5.0, 0.10, _make_pe_series(), 100.0, 0.04)
+        assert result["bear"]["pe"] == pytest.approx(12.0)
+
+    def test_bull_pe_floored_at_config_floor(self):
+        """Bull terminal P/E = max(mean_pe, pe_floor=20) → 20 when mean < 20."""
+        result = compute_intrinsic_value(5.0, 0.10, _make_pe_series(), 100.0, 0.04)
+        assert result["bull"]["pe"] == pytest.approx(20.0)
+
+    def test_negative_eps_cagr_floors_bear_and_base_growth_to_zero(self):
+        """Negative EPS CAGR → bear=0, base=0, bull=max(cagr*1.3, 0.03)."""
+        result = compute_intrinsic_value(5.0, -0.05, _make_pe_series(), 100.0, 0.04)
+        assert result["bear"]["growth"] == pytest.approx(0.0)
+        assert result["base"]["growth"] == pytest.approx(0.0)
+        assert result["bull"]["growth"] == pytest.approx(0.03)
+
+    def test_nan_eps_cagr_treated_as_zero(self):
+        """NaN EPS CAGR → growth rates bear=0, base=0, bull=0.03."""
+        result = compute_intrinsic_value(5.0, float("nan"), _make_pe_series(), 100.0, 0.04)
+        assert result["bear"]["growth"] == pytest.approx(0.0)
+        assert result["base"]["growth"] == pytest.approx(0.0)
+        assert result["bull"]["growth"] == pytest.approx(0.03)
+
+    def test_zero_eps_returns_all_nan(self):
+        """current_eps = 0 → all scenario fields NaN, meets_hurdle = False."""
+        result = compute_intrinsic_value(0.0, 0.10, _make_pe_series(), 100.0, 0.04)
+        assert math.isnan(result["weighted_iv"])
+        assert math.isnan(result["bear"]["present_value"])
+        assert result["meets_hurdle"] is False
+
+    def test_negative_eps_returns_all_nan(self):
+        """current_eps < 0 → all NaN (same as zero)."""
+        result = compute_intrinsic_value(-2.0, 0.10, _make_pe_series(), 100.0, 0.04)
+        assert math.isnan(result["weighted_iv"])
+
+    def test_empty_pe_series_uses_fallback(self):
+        """Empty historical P/E → fallback P/E=15, no crash."""
+        result = compute_intrinsic_value(5.0, 0.10, pd.Series(dtype=float), 100.0, 0.04)
+        # With fallback_pe=15: bear_pe=min(15,12)=12, base_pe=15, bull_pe=max(15,20)=20
+        assert result["bear"]["pe"] == pytest.approx(12.0)
+        assert result["base"]["pe"] == pytest.approx(15.0)
+        assert result["bull"]["pe"] == pytest.approx(20.0)
+
+    def test_meets_hurdle_true_when_iv_well_above_price(self):
+        """Low current price relative to IV → projected return exceeds hurdle."""
+        # price=20, weighted_iv ≈ 107.15 → w_return ≈ (107.15/20)^(1/10)-1 ≈ 18.3% > 15%
+        result = compute_intrinsic_value(5.0, 0.10, _make_pe_series(), 20.0, 0.04)
+        assert result["meets_hurdle"] is True
+
+    def test_result_dict_keys_present(self):
+        result = compute_intrinsic_value(5.0, 0.10, _make_pe_series(), 100.0, 0.04)
+        assert set(result.keys()) == {"bear", "base", "bull", "weighted_iv", "meets_hurdle"}
+        scenario_keys = {"growth", "pe", "projected_price", "present_value", "annual_return", "probability"}
+        assert set(result["bear"].keys()) == scenario_keys
+
+
+# ===========================================================================
+# Tests — compute_margin_of_safety (F15)
+# ===========================================================================
+
+class TestComputeMarginOfSafety:
+    def test_known_mos_one_third(self):
+        """IV=150, price=100 → MoS = (150-100)/150 = 1/3 ≈ 0.333."""
+        result = compute_margin_of_safety(intrinsic_value=150.0, current_price=100.0)
+        assert result["margin_of_safety"] == pytest.approx(1 / 3, rel=1e-4)
+
+    def test_is_undervalued_true_when_mos_positive(self):
+        """Price below IV → is_undervalued = True."""
+        result = compute_margin_of_safety(150.0, 100.0)
+        assert result["is_undervalued"] is True
+
+    def test_is_undervalued_false_when_overvalued(self):
+        """Price above IV → MoS < 0 → is_undervalued = False."""
+        result = compute_margin_of_safety(80.0, 100.0)
+        assert result["is_undervalued"] is False
+        assert result["margin_of_safety"] == pytest.approx(-0.25)
+
+    def test_meets_threshold_true_when_above_buy_min_mos(self):
+        """MoS=1/3 ≈ 0.333 ≥ buy_min_mos=0.25 → meets_threshold=True."""
+        result = compute_margin_of_safety(150.0, 100.0)
+        assert result["meets_threshold"] is True
+
+    def test_meets_threshold_false_when_below_buy_min_mos(self):
+        """MoS ≈ 0.10 < buy_min_mos=0.25 → meets_threshold=False."""
+        result = compute_margin_of_safety(111.0, 100.0)  # MoS ≈ 0.099
+        assert result["meets_threshold"] is False
+
+    def test_nan_intrinsic_value_returns_nan(self):
+        result = compute_margin_of_safety(float("nan"), 100.0)
+        assert math.isnan(result["margin_of_safety"])
+        assert result["is_undervalued"] is False
+
+    def test_zero_intrinsic_value_returns_nan(self):
+        result = compute_margin_of_safety(0.0, 100.0)
+        assert math.isnan(result["margin_of_safety"])
+
+    def test_result_dict_keys_present(self):
+        result = compute_margin_of_safety(150.0, 100.0)
+        assert set(result.keys()) == {"margin_of_safety", "is_undervalued", "meets_threshold"}
+
+
+# ===========================================================================
+# Tests — compute_earnings_yield (F16)
+# ===========================================================================
+
+class TestComputeEarningsYield:
+    def test_basic_known_yield(self):
+        """eps=5, price=100 → earnings_yield = 0.05."""
+        result = compute_earnings_yield(eps=5.0, price=100.0, risk_free_rate=0.04)
+        assert result["earnings_yield"] == pytest.approx(0.05)
+
+    def test_spread_computed_correctly(self):
+        """spread = earnings_yield − risk_free_rate."""
+        result = compute_earnings_yield(5.0, 100.0, risk_free_rate=0.04)
+        assert result["spread"] == pytest.approx(0.01)   # 0.05 − 0.04
+
+    def test_equities_attractive_true_when_spread_exceeds_threshold(self):
+        """spread=0.03 > 0.02 threshold → equities_attractive = True."""
+        result = compute_earnings_yield(5.0, 100.0, risk_free_rate=0.02)
+        assert result["equities_attractive"] is True
+
+    def test_equities_attractive_false_when_spread_below_threshold(self):
+        """spread=0.01 < 0.02 threshold → equities_attractive = False."""
+        result = compute_earnings_yield(5.0, 100.0, risk_free_rate=0.04)
+        assert result["equities_attractive"] is False
+
+    def test_bond_yield_stored_as_risk_free_rate(self):
+        """bond_yield field echoes the risk_free_rate argument."""
+        result = compute_earnings_yield(5.0, 100.0, risk_free_rate=0.045)
+        assert result["bond_yield"] == pytest.approx(0.045)
+
+    def test_zero_price_returns_nan(self):
+        result = compute_earnings_yield(5.0, price=0.0, risk_free_rate=0.04)
+        assert math.isnan(result["earnings_yield"])
+        assert result["equities_attractive"] is False
+
+    def test_negative_eps_computes_negative_yield(self):
+        """Negative EPS → negative earnings yield; computed and returned as-is."""
+        result = compute_earnings_yield(-5.0, 100.0, risk_free_rate=0.04)
+        assert result["earnings_yield"] == pytest.approx(-0.05)
+
+    def test_result_dict_keys_present(self):
+        result = compute_earnings_yield(5.0, 100.0, 0.04)
+        assert set(result.keys()) == {
+            "earnings_yield", "bond_yield", "spread", "equities_attractive"
+        }
