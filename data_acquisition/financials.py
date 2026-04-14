@@ -7,6 +7,27 @@ JSON responses for auditability.
 Authoritative spec: docs/DATA_SOURCES.md §3, docs/FORMULAS.md F1–F16 line items.
 All API configuration comes from config/filter_config.yaml via api_config / filter_config_loader.
 
+Data lineage contract
+---------------------
+Upstream dependencies:
+  api_config.py          → build_fmp_url, fmp_limiter, resilient_request
+  schema.py              → CANONICAL_COLUMNS, LINE_ITEM_MAP, resolve_all_fields
+  filter_config_loader   → get_config (for universe.required_history_years,
+                            data_sources.fmp.rate_limit_per_min,
+                            data_sources.store_raw_responses)
+
+Config dependency map (all from config/filter_config.yaml):
+  universe.required_history_years  → fetch_financial_statements (FMP limit param)
+  data_sources.fmp.rate_limit_per_min → _log_eta (ETA calculation)
+  data_sources.store_raw_responses → _persist_raw (raw JSON toggle)
+
+Downstream consumers:
+  store.py               → writes income_statement, balance_sheet, cash_flow,
+                            substitution_log DataFrames to DuckDB
+  data_quality.py        → uses substitution log to assess field coverage and
+                            flag tickers for drop/review
+  metrics_engine/        → reads normalised financial tables from DuckDB
+
 Key exports
 -----------
 fetch_financial_statements(ticker) -> dict[str, pd.DataFrame | None]
@@ -35,6 +56,7 @@ from data_acquisition.schema import (
     LINE_ITEM_MAP,
     resolve_all_fields,
 )
+from screener.filter_config_loader import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +122,17 @@ def fetch_financial_statements(
     results: dict[str, pd.DataFrame | None] = {}
     raw_responses: dict[str, Any] = {}
 
+    # Read the history window from config instead of hardcoding limit=10.
+    cfg = get_config()
+    history_years: int = int(
+        cfg.get("universe", {}).get("required_history_years", 10)
+    )
+
     for stmt_type, endpoint_tpl in _ENDPOINTS.items():
         endpoint = endpoint_tpl.format(ticker=fmp_ticker)
-        url, params = build_fmp_url(endpoint, period="annual", limit=10)
+        url, params = build_fmp_url(
+            endpoint, period="annual", limit=history_years
+        )
 
         try:
             data = resilient_request(url, params=params, rate_limiter=fmp_limiter)
@@ -271,6 +301,25 @@ def fetch_all_financials(
     - Progress is logged every ``batch_size`` tickers at INFO level.
     """
     tickers: list[str] = universe_df["ticker"].dropna().unique().tolist()
+
+    # Pre-suffix TSX tickers with '.TO' when the universe provides an exchange
+    # column.  FMP requires the '.TO' suffix to resolve Canadian equities.
+    if "exchange" in universe_df.columns:
+        tsx_tickers = set(
+            universe_df.loc[
+                universe_df["exchange"].str.upper() == "TSX", "ticker"
+            ].dropna()
+        )
+        tickers = [
+            t if t.endswith(".TO") or t not in tsx_tickers else f"{t}.TO"
+            for t in tickers
+        ]
+        if tsx_tickers:
+            logger.info(
+                "Pre-suffixed %d TSX ticker(s) with '.TO' for FMP compatibility.",
+                len(tsx_tickers),
+            )
+
     total = len(tickers)
 
     if total == 0:
@@ -555,7 +604,6 @@ def _persist_raw(ticker: str, raw_responses: dict[str, Any]) -> None:
         return
 
     try:
-        from screener.filter_config_loader import get_config
         cfg = get_config()
         if not cfg.get("data_sources", {}).get("store_raw_responses", True):
             return
@@ -583,7 +631,6 @@ def _log_eta(total_tickers: int) -> None:
         Total number of tickers to fetch.
     """
     try:
-        from screener.filter_config_loader import get_config
         cfg = get_config()
         rate = cfg.get("data_sources", {}).get("fmp", {}).get(
             "rate_limit_per_min", _MIN_RATE

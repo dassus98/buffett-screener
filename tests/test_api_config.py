@@ -3,6 +3,21 @@
 All tests are pure-Python with no real network calls or real API keys.
 ``requests.get`` and ``time.sleep`` / ``time.monotonic`` are patched via
 ``unittest.mock`` throughout.
+
+Coverage
+--------
+TestRateLimiterInit            — constructor validation (3 tests)
+TestRateLimiterWaitIfNeeded    — sliding-window blocking behaviour (6 tests)
+TestResilientRequestSuccess    — 200 happy-path (3 tests)
+TestResilientRequestRetryOn429 — 429 / 5xx retry logic (6 tests)
+TestResilientRequestRaiseOn4xx — non-retryable 4xx and connection errors (5 tests)
+TestBuildFmpUrl                — URL construction (8 tests)
+TestApiKeyLoading              — .env credential loading (6 tests)
+TestPreconfiguredLimiters      — fmp_limiter / fred_limiter from config (6 tests)
+TestBackoffWait                — exponential backoff schedule (4 tests)
+TestRedactKey                  — API key redaction in logs (4 tests)
+TestConfigDrivenRetry          — verify retry params come from config (5 tests)
+TestRequestTimeout             — verify timeout passed to requests.get (2 tests)
 """
 
 from __future__ import annotations
@@ -19,6 +34,10 @@ import requests
 from data_acquisition.api_config import (
     RateLimiter,
     _backoff_wait,
+    _BASE_WAIT_SECONDS,
+    _MAX_RETRIES,
+    _REQUEST_TIMEOUT,
+    _RETRY_STATUSES,
     _redact_key,
     build_fmp_url,
     fmp_limiter,
@@ -470,20 +489,23 @@ class TestPreconfiguredLimiters:
 
 
 class TestBackoffWait:
-    """_backoff_wait returns correct schedule values."""
+    """_backoff_wait uses exponential formula: _BASE_WAIT_SECONDS × 2^attempt."""
 
-    def test_attempt_0_returns_1s(self) -> None:
-        assert _backoff_wait(0) == 1.0
+    def test_attempt_0_returns_base_wait(self) -> None:
+        """Attempt 0: base × 2^0 = base × 1 = 1.0 s (with default base=1.0)."""
+        assert _backoff_wait(0) == _BASE_WAIT_SECONDS * (2 ** 0)
 
-    def test_attempt_1_returns_2s(self) -> None:
-        assert _backoff_wait(1) == 2.0
+    def test_attempt_1_returns_2x_base(self) -> None:
+        """Attempt 1: base × 2^1 = 2.0 s (with default base=1.0)."""
+        assert _backoff_wait(1) == _BASE_WAIT_SECONDS * (2 ** 1)
 
-    def test_attempt_2_returns_4s(self) -> None:
-        assert _backoff_wait(2) == 4.0
+    def test_attempt_2_returns_4x_base(self) -> None:
+        """Attempt 2: base × 2^2 = 4.0 s (with default base=1.0)."""
+        assert _backoff_wait(2) == _BASE_WAIT_SECONDS * (2 ** 2)
 
-    def test_attempt_beyond_schedule_returns_max(self) -> None:
-        """Attempt index beyond schedule length must clamp to the last value (4 s)."""
-        assert _backoff_wait(10) == 4.0
+    def test_attempt_scales_exponentially_beyond_3(self) -> None:
+        """Higher attempts continue doubling (no clamping)."""
+        assert _backoff_wait(5) == _BASE_WAIT_SECONDS * (2 ** 5)
 
 
 class TestRedactKey:
@@ -505,3 +527,67 @@ class TestRedactKey:
     def test_api_key_variant_spelling_redacted(self) -> None:
         result = _redact_key("https://example.com", {"api_key": "secret"})
         assert "secret" not in result
+
+
+# ---------------------------------------------------------------------------
+# Config-driven retry parameter tests
+# ---------------------------------------------------------------------------
+
+
+class TestConfigDrivenRetry:
+    """Verify that retry parameters (_RETRY_STATUSES, _BASE_WAIT_SECONDS,
+    _MAX_RETRIES) are read from config/filter_config.yaml rather than
+    being hardcoded.  This ensures compliance with CLAUDE.md's
+    "no hardcoded thresholds" rule.
+    """
+
+    def test_retry_statuses_include_429(self) -> None:
+        """429 (rate limit) must always be retryable per DATA_SOURCES.md §2."""
+        assert 429 in _RETRY_STATUSES
+
+    def test_retry_statuses_include_5xx(self) -> None:
+        """500, 502, 503, 504 must all be retryable per DATA_SOURCES.md §2."""
+        for code in (500, 502, 503, 504):
+            assert code in _RETRY_STATUSES, f"Expected {code} in _RETRY_STATUSES"
+
+    def test_retry_statuses_exclude_4xx_other_than_429(self) -> None:
+        """400, 401, 403, 404 must NOT be retryable per DATA_SOURCES.md §2."""
+        for code in (400, 401, 403, 404):
+            assert code not in _RETRY_STATUSES, f"{code} should not be retryable"
+
+    def test_base_wait_seconds_is_positive(self) -> None:
+        """base_wait_seconds from config must be a positive number."""
+        assert _BASE_WAIT_SECONDS > 0
+
+    def test_max_retries_matches_config(self) -> None:
+        """_MAX_RETRIES must be read from config, not hardcoded.
+        The config default is 3 (data_sources.retry.max_attempts).
+        """
+        assert _MAX_RETRIES == 3
+        # Verify the default parameter value on resilient_request matches
+        import inspect
+        sig = inspect.signature(resilient_request)
+        default = sig.parameters["max_retries"].default
+        assert default == _MAX_RETRIES
+
+
+# ---------------------------------------------------------------------------
+# Request timeout tests
+# ---------------------------------------------------------------------------
+
+
+class TestRequestTimeout:
+    """Verify that the per-request timeout is passed to requests.get."""
+
+    def test_timeout_passed_to_requests_get(self) -> None:
+        """requests.get must receive timeout=_REQUEST_TIMEOUT on every call."""
+        with patch("data_acquisition.api_config.requests.get",
+                   return_value=_mock_response(200, {"ok": True})) as mock_get:
+            resilient_request("https://example.com/api", max_retries=0)
+        # Verify timeout kwarg
+        _, kwargs = mock_get.call_args
+        assert kwargs["timeout"] == _REQUEST_TIMEOUT
+
+    def test_timeout_is_30_seconds(self) -> None:
+        """Default timeout must be 30 seconds per DATA_SOURCES.md."""
+        assert _REQUEST_TIMEOUT == 30

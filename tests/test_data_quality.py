@@ -408,6 +408,87 @@ class TestAssessTickerQuality:
         )
         assert result["drop"] is False
 
+    @patch("data_acquisition.data_quality.get_config")
+    def test_uses_min_field_coverage_years_for_field_check(
+        self, mock_cfg: MagicMock,
+    ) -> None:
+        """Field coverage must use data_quality.min_field_coverage_years, NOT
+        universe.min_history_years. When they differ, only min_field_coverage_years
+        governs the per-field non-null check (docs/DATA_SOURCES.md §4)."""
+        # year count threshold = 5 → 8 years pass year check
+        # field coverage threshold = 9 → 8 non-null per field FAILS
+        mock_cfg.return_value = {
+            "universe": {"min_history_years": 5},
+            "data_quality": {
+                "min_field_coverage_years": 9,
+                "max_substitutions_before_flag": 2,
+            },
+        }
+        result = assess_ticker_quality(
+            "TEST",
+            _make_income_df(n_years=8),
+            _make_balance_df(n_years=8),
+            _make_cashflow_df(n_years=8),
+        )
+        # Year coverage passes (8 >= 5).
+        assert result["years_available"] == 8
+        # Field coverage fails (8 non-null < 9 required) → drop.
+        assert result["drop"] is True
+        assert len(result["missing_critical_fields"]) > 0
+        # Drop reason should mention "Critical fields", not "Insufficient fiscal year".
+        assert "Critical fields" in result["drop_reason"]
+        assert "Insufficient" not in result["drop_reason"]
+
+    @patch("data_acquisition.data_quality.get_config")
+    def test_min_field_coverage_defaults_to_min_history_years(
+        self, mock_cfg: MagicMock,
+    ) -> None:
+        """If min_field_coverage_years is absent from config, it should fall back
+        to min_history_years as a safe default."""
+        mock_cfg.return_value = {
+            "universe": {"min_history_years": 8},
+            "data_quality": {
+                # min_field_coverage_years intentionally omitted.
+                "max_substitutions_before_flag": 2,
+            },
+        }
+        result = assess_ticker_quality(
+            "AAPL",
+            _make_income_df(n_years=10),
+            _make_balance_df(n_years=10),
+            _make_cashflow_df(n_years=10),
+        )
+        # 10 years of complete data → passes both checks with fallback.
+        assert result["drop"] is False
+
+    @patch("data_acquisition.data_quality.get_config")
+    def test_substitution_warning_threshold_from_config(
+        self, mock_cfg: MagicMock,
+    ) -> None:
+        """Substitution warning threshold must come from
+        data_quality.max_substitutions_before_flag config key."""
+        mock_cfg.return_value = {
+            "universe": {"min_history_years": 8},
+            "data_quality": {
+                "min_field_coverage_years": 8,
+                "max_substitutions_before_flag": 1,  # Low threshold.
+            },
+        }
+        with patch("data_acquisition.data_quality.logger") as mock_logger:
+            assess_ticker_quality(
+                "AAPL",
+                _make_income_df(n_years=10),
+                _make_balance_df(n_years=10),
+                _make_cashflow_df(n_years=10),
+                substitutions_count=2,
+            )
+            # 2 > 1 → should warn.
+            warning_calls = [
+                c for c in mock_logger.warning.call_args_list
+                if "substitution" in str(c).lower()
+            ]
+            assert len(warning_calls) >= 1
+
 
 # ===========================================================================
 # Tests: _collect_all_tickers

@@ -11,6 +11,33 @@ the ``BUFFETT_DB_PATH`` environment variable.
 Authoritative spec: docs/ARCHITECTURE.md §10 (DuckDB Table Reference),
 §store.py (upsert pattern: delete-then-insert).
 
+Data lineage contract
+---------------------
+Upstream producers (write via write_dataframe):
+  universe.py            → ``universe`` table (UNIVERSE_COLUMNS: 7 cols)
+  financials.py          → ``income_statement``, ``balance_sheet``, ``cash_flow``
+                            tables (columns match schema.py LINE_ITEM_MAP groups)
+  market_data.py         → ``market_data`` table (MARKET_DATA_COLUMNS: 11 cols)
+  macro_data.py          → ``macro_data`` table (key-value rows: 3 cols)
+  data_quality.py        → ``data_quality_log`` table (6 cols from assess_ticker_quality)
+  __init__.py            → ``substitution_log`` table (5 cols from _build_substitution_df)
+
+Column alignment (verified against upstream constants):
+  _TABLE_COLUMNS["universe"]          == universe.UNIVERSE_COLUMNS
+  _TABLE_COLUMNS["market_data"]       == market_data.MARKET_DATA_COLUMNS
+  _TABLE_COLUMNS["income_statement"]  == schema.py income_statement fields + (ticker, fiscal_year)
+  _TABLE_COLUMNS["balance_sheet"]     == schema.py balance_sheet fields + (ticker, fiscal_year)
+  _TABLE_COLUMNS["cash_flow"]         == schema.py cash_flow fields + (ticker, fiscal_year)
+
+Config dependency map:
+  BUFFETT_DB_PATH (env var)  → DB_PATH (database file location; no filter_config.yaml dependency)
+
+Downstream consumers (read via read_table or get_connection):
+  metrics_engine/        → reads all financial tables + market_data + macro_data
+  screener/              → reads data_quality_log (surviving tickers), metrics tables
+  valuation_reports/     → reads market_data, macro_data, metrics tables
+  output/                → reads all tables (dashboard display)
+
 Key exports
 -----------
 init_db(db_path) -> None

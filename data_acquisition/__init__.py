@@ -10,6 +10,31 @@ Typical usage
 
     # Or directly from the command line:
     python -m data_acquisition [--no-cache]
+
+Data lineage contract
+---------------------
+This module is the **orchestration layer for Module 1** (docs/ARCHITECTURE.md §2).
+It imports and sequences all sub-modules; it does not implement any data-fetching
+or validation logic itself.
+
+Upstream sub-modules invoked (in pipeline order):
+  store.py            → init_db() creates DuckDB schema (Step 1)
+  universe.py         → get_universe() fetches investable universe (Step 2)
+  financials.py       → fetch_all_financials() fetches 10yr statements (Step 3)
+  market_data.py      → fetch_market_data() fetches current prices (Step 4)
+  macro_data.py       → fetch_macro_data() fetches treasury/FX rates (Step 5)
+  data_quality.py     → run_data_quality_check() enforces drop rules (Step 6)
+  store.py            → write_dataframe() persists every result to DuckDB
+
+Downstream consumers:
+  metrics_engine/     → reads all DuckDB tables written by this pipeline
+  output/pipeline_runner.py → calls run_data_acquisition() as pipeline Stage 1
+
+Config dependencies:
+  use_cache parameter → forwarded to get_universe() and fetch_macro_data()
+  All sub-module configs are read internally by each sub-module via
+  filter_config_loader.get_config() — this orchestrator has no direct
+  config dependency.
 """
 
 from __future__ import annotations
@@ -75,7 +100,7 @@ def run_data_acquisition(use_cache: bool = True) -> dict[str, Any]:
     _acquire_market_data(tickers)
 
     # Step 5 — macro indicators
-    macro = _acquire_macro_data()
+    macro = _acquire_macro_data(use_cache)
 
     # Step 6 — data quality
     _, survivors_df = _run_quality(financials, sub_log)
@@ -169,15 +194,21 @@ def _acquire_market_data(tickers: list[str]) -> None:
     logger.info("Market data stored for %d tickers.", len(market_df))
 
 
-def _acquire_macro_data() -> dict[str, Any]:
+def _acquire_macro_data(use_cache: bool = True) -> dict[str, Any]:
     """Step 5: fetch macro indicators and write them to DuckDB.
+
+    Parameters
+    ----------
+    use_cache:
+        If ``True`` (default), use cached macro data when fresh (< 1 day).
+        Pass ``False`` to force a fresh fetch from FRED.
 
     Returns
     -------
     dict
         Raw macro dict as returned by :func:`fetch_macro_data`.
     """
-    macro = fetch_macro_data()
+    macro = fetch_macro_data(use_cache=use_cache)
     macro_df = _build_macro_df(macro)
     if not macro_df.empty:
         write_dataframe("macro_data", macro_df)

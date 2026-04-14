@@ -6,8 +6,8 @@ Assesses each ticker's financial statement DataFrames against two quality thresh
   1. **Year coverage**: ``years_available`` must be ≥ ``universe.min_history_years``
      (default 8). Tickers with fewer fiscal years are dropped.
   2. **Field coverage**: Each field in ``get_drop_required_fields()`` must have
-     non-null values for ≥ ``universe.min_history_years`` fiscal years. Tickers
-     failing any field are dropped.
+     non-null values for ≥ ``data_quality.min_field_coverage_years`` fiscal years.
+     Tickers failing any field are dropped.
 
 Diagnostics (not gates):
   - Substitution density: logs WARNING if a ticker used > 2 field substitutes.
@@ -15,6 +15,29 @@ Diagnostics (not gates):
     ``total_revenue``, ``eps_diluted``; logs WARNING where divergence > 5%.
 
 All thresholds are read from ``config/filter_config.yaml`` at runtime.
+
+Data lineage contract
+---------------------
+Upstream dependencies:
+  schema.py              → LINE_ITEM_MAP (statement type lookup for each field),
+                            get_drop_required_fields() (10 canonical fields with
+                            drop_if_missing=True)
+  filter_config_loader   → get_config() for all thresholds (see Config dependency map)
+  financials.py          → produces ``financials`` dict and ``substitution_log`` list
+                            consumed by run_data_quality_check()
+  yfinance               → cross_validate_sample fetches comparison values
+
+Config dependency map (all from config/filter_config.yaml):
+  universe.min_history_years              → assess_ticker_quality (year count check)
+  data_quality.min_field_coverage_years   → assess_ticker_quality (field coverage check)
+  data_quality.max_substitutions_before_flag → assess_ticker_quality (substitution warning)
+  data_quality.cross_validate_sample_size → cross_validate_sample (default sample size)
+  data_quality.cross_validate_tolerance   → cross_validate_sample (divergence threshold)
+
+Downstream consumers:
+  __init__.py            → run_data_quality_check() called as pipeline Step 6
+  store.py               → writes quality_report_df to DuckDB ``data_quality_log`` table
+  screener/              → reads survivors_df (tickers with drop=False) for filtering
 
 Key exports
 -----------
@@ -97,7 +120,7 @@ def assess_ticker_quality(
     - ``ticker`` (str)
     - ``years_available`` (int) — distinct fiscal years across all statements
     - ``missing_critical_fields`` (list[str]) — required-drop fields with
-      fewer than ``min_history_years`` non-null observations
+      fewer than ``min_field_coverage_years`` non-null observations
     - ``substitutions_count`` (int)
     - ``drop`` (bool) — True if quality thresholds are not met
     - ``drop_reason`` (str or None) — human-readable explanation, or None
@@ -108,7 +131,13 @@ def assess_ticker_quality(
     ``data_quality.max_substitutions_before_flag`` config threshold.
     """
     cfg = get_config()
+    # Year count threshold: minimum distinct fiscal years across all statements.
     min_years: int = int(cfg["universe"]["min_history_years"])
+    # Field coverage threshold: minimum non-null observations per drop-required field.
+    # Semantically distinct from min_years — uses data_quality.min_field_coverage_years.
+    min_field_years: int = int(
+        cfg.get("data_quality", {}).get("min_field_coverage_years", min_years)
+    )
     max_subs: int = int(cfg.get("data_quality", {}).get("max_substitutions_before_flag", 2))
 
     stmt_map = {
@@ -117,7 +146,7 @@ def assess_ticker_quality(
         "cash_flow": cashflow_df,
     }
     years_available = _count_years_available(income_df, balance_df, cashflow_df)
-    missing_critical = _find_missing_critical_fields(stmt_map, min_years)
+    missing_critical = _find_missing_critical_fields(stmt_map, min_field_years)
 
     if substitutions_count > max_subs:
         logger.warning(

@@ -2,6 +2,17 @@
 
 All external I/O (API calls, filesystem access, time) is mocked.
 No real network requests or disk writes are made.
+
+Coverage
+--------
+TestNormaliseFmpRows               — FMP row → canonical DataFrame mapping (8 tests)
+TestFilterUniverseExcludeFinancials — sector/industry exclusion logic (16 tests)
+TestFilterUniverseConfigDriven     — config-driven exclusion behaviour (7 tests)
+TestFetchUniverse                  — mocked API assembly across exchanges (7 tests)
+TestCacheIsFresh                   — file existence and age checking (4 tests)
+TestGetUniverseCacheHit            — cache read path (2 tests)
+TestGetUniverseCacheMiss           — cache miss / force-refresh path (4 tests)
+TestEmptyUniverseDf                — empty DataFrame factory (2 tests)
 """
 
 from __future__ import annotations
@@ -28,7 +39,7 @@ from data_acquisition.universe import (
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures & helpers
 # ---------------------------------------------------------------------------
 
 def _make_fmp_rows(
@@ -62,6 +73,34 @@ def _make_universe_df(
     """Return a pre-normalised universe DataFrame."""
     rows = _make_fmp_rows(tickers, sector=sector, industry=industry, exchange=exchange)
     return _normalise_fmp_rows(rows, canonical_exchange=exchange)
+
+
+def _exclusion_config(
+    financial_sector_label: str = "Financial Services",
+    sectors: list[str] | None = None,
+    industry_keywords: list[str] | None = None,
+) -> dict:
+    """Return a mock config dict with the exclusions section populated.
+
+    Default values mirror the production config/filter_config.yaml so that
+    tests exercise the same code paths as the real pipeline.
+
+    Note: uses ``is not None`` checks (not ``or``) so that an explicit
+    empty list ``[]`` is honoured rather than being replaced by defaults.
+    """
+    if industry_keywords is None:
+        industry_keywords = [
+            "Banks", "Insurance", "REIT",
+            "Real Estate Investment", "Mortgage Finance",
+            "Thrift", "Savings",
+        ]
+    return {
+        "exclusions": {
+            "financial_sector_label": financial_sector_label,
+            "sectors": sectors if sectors is not None else [],
+            "industry_keywords": industry_keywords,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -119,98 +158,143 @@ class TestNormaliseFmpRows:
 
 
 # ---------------------------------------------------------------------------
-# filter_universe tests
+# filter_universe tests — exclusion logic
 # ---------------------------------------------------------------------------
 
 class TestFilterUniverseExcludeFinancials:
-    """Sector and industry-based exclusion logic."""
+    """Sector and industry-based exclusion logic.
 
-    def test_tech_sector_not_excluded(self) -> None:
+    All tests mock ``get_config`` to supply exclusion criteria from config,
+    mirroring the production config/filter_config.yaml values.
+    """
+
+    @patch("data_acquisition.universe.get_config")
+    def test_tech_sector_not_excluded(self, mock_cfg) -> None:
+        mock_cfg.return_value = _exclusion_config()
         df = _make_universe_df(["AAPL", "MSFT"], sector="Technology")
         result = filter_universe(df)
         assert len(result) == 2
         assert set(result["ticker"]) == {"AAPL", "MSFT"}
 
-    def test_financial_services_sector_excluded(self) -> None:
+    @patch("data_acquisition.universe.get_config")
+    def test_financial_services_sector_excluded(self, mock_cfg) -> None:
+        mock_cfg.return_value = _exclusion_config()
         df = _make_universe_df(["JPM", "BAC"], sector="Financial Services")
         result = filter_universe(df)
         assert len(result) == 0
 
-    def test_financials_sector_excluded(self) -> None:
-        """Alternate sector name 'Financials' must also be excluded."""
+    @patch("data_acquisition.universe.get_config")
+    def test_financials_sector_excluded_when_in_config(self, mock_cfg) -> None:
+        """Sector 'Financials' is excluded when added to config exclusions.sectors."""
+        mock_cfg.return_value = _exclusion_config(sectors=["Financials"])
         df = _make_universe_df(["MS", "GS"], sector="Financials")
         result = filter_universe(df)
         assert len(result) == 0
 
-    def test_bank_industry_excluded(self) -> None:
+    @patch("data_acquisition.universe.get_config")
+    def test_bank_industry_excluded(self, mock_cfg) -> None:
+        mock_cfg.return_value = _exclusion_config()
         df = _make_universe_df(["RY", "TD"], sector="Technology", industry="Banks")
         result = filter_universe(df)
         assert len(result) == 0
 
-    def test_insurance_industry_excluded(self) -> None:
+    @patch("data_acquisition.universe.get_config")
+    def test_insurance_industry_excluded(self, mock_cfg) -> None:
+        mock_cfg.return_value = _exclusion_config()
         df = _make_universe_df(["MFC"], sector="Technology", industry="Life Insurance")
         result = filter_universe(df)
         assert len(result) == 0
 
-    def test_reit_industry_excluded(self) -> None:
+    @patch("data_acquisition.universe.get_config")
+    def test_reit_industry_excluded(self, mock_cfg) -> None:
+        mock_cfg.return_value = _exclusion_config()
         df = _make_universe_df(["SPG"], sector="Real Estate", industry="REIT - Retail")
         result = filter_universe(df)
         assert len(result) == 0
 
-    def test_mortgage_industry_excluded(self) -> None:
+    @patch("data_acquisition.universe.get_config")
+    def test_mortgage_industry_excluded(self, mock_cfg) -> None:
+        mock_cfg.return_value = _exclusion_config()
         df = _make_universe_df(["AGNC"], sector="Finance", industry="Mortgage Finance")
         result = filter_universe(df)
         assert len(result) == 0
 
-    def test_savings_industry_excluded(self) -> None:
+    @patch("data_acquisition.universe.get_config")
+    def test_savings_industry_excluded(self, mock_cfg) -> None:
+        mock_cfg.return_value = _exclusion_config()
         df = _make_universe_df(["WFC"], sector="Finance", industry="Savings Institutions")
         result = filter_universe(df)
         assert len(result) == 0
 
-    def test_investment_trust_industry_excluded(self) -> None:
-        df = _make_universe_df(["BX"], sector="Finance", industry="Investment Trust")
+    @patch("data_acquisition.universe.get_config")
+    def test_thrift_industry_excluded(self, mock_cfg) -> None:
+        """'Thrift' keyword from config excludes thrift institutions."""
+        mock_cfg.return_value = _exclusion_config()
+        df = _make_universe_df(["TFC"], sector="Finance", industry="Thrift & Savings")
         result = filter_universe(df)
         assert len(result) == 0
 
-    def test_mixed_df_only_financials_removed(self) -> None:
+    @patch("data_acquisition.universe.get_config")
+    def test_real_estate_investment_industry_excluded(self, mock_cfg) -> None:
+        """'Real Estate Investment' keyword from config catches REIT variants."""
+        mock_cfg.return_value = _exclusion_config()
+        df = _make_universe_df(["BX"], sector="Finance", industry="Real Estate Investment Trust")
+        result = filter_universe(df)
+        assert len(result) == 0
+
+    @patch("data_acquisition.universe.get_config")
+    def test_mixed_df_only_financials_removed(self, mock_cfg) -> None:
+        mock_cfg.return_value = _exclusion_config()
         tech = _make_universe_df(["AAPL", "GOOG"], sector="Technology")
         fin = _make_universe_df(["JPM"], sector="Financial Services", industry="Banks")
         mixed = pd.concat([tech, fin], ignore_index=True)
         result = filter_universe(mixed)
         assert set(result["ticker"]) == {"AAPL", "GOOG"}
 
-    def test_exclusion_is_case_insensitive(self) -> None:
+    @patch("data_acquisition.universe.get_config")
+    def test_exclusion_is_case_insensitive(self, mock_cfg) -> None:
         """Sector matching must be case-insensitive."""
+        mock_cfg.return_value = _exclusion_config()
         df = _make_universe_df(["XYZ"], sector="financial services")
         result = filter_universe(df)
         assert len(result) == 0
 
-    def test_partial_industry_keyword_match(self) -> None:
-        """'Banks' should match 'Regional Banks' and 'Banks — Diversified'."""
+    @patch("data_acquisition.universe.get_config")
+    def test_partial_industry_keyword_match(self, mock_cfg) -> None:
+        """'Banks' should match 'Regional Banks' via substring matching."""
+        mock_cfg.return_value = _exclusion_config()
         df = _make_universe_df(["USB"], sector="Finance", industry="Regional Banks")
         result = filter_universe(df)
         assert len(result) == 0
 
-    def test_missing_sector_column_does_not_raise(self) -> None:
+    @patch("data_acquisition.universe.get_config")
+    def test_missing_sector_column_does_not_raise(self, mock_cfg) -> None:
         """If sector column is absent, skip sector filter and continue."""
+        mock_cfg.return_value = _exclusion_config()
         df = _make_universe_df(["AAPL"])
         df = df.drop(columns=["sector"])
         result = filter_universe(df)  # should not raise
         assert "AAPL" in result["ticker"].values
 
-    def test_missing_industry_column_does_not_raise(self) -> None:
+    @patch("data_acquisition.universe.get_config")
+    def test_missing_industry_column_does_not_raise(self, mock_cfg) -> None:
+        mock_cfg.return_value = _exclusion_config()
         df = _make_universe_df(["AAPL"])
         df = df.drop(columns=["industry"])
         result = filter_universe(df)  # should not raise
         assert "AAPL" in result["ticker"].values
 
-    def test_empty_df_returns_empty_df(self) -> None:
+    @patch("data_acquisition.universe.get_config")
+    def test_empty_df_returns_empty_df(self, mock_cfg) -> None:
+        mock_cfg.return_value = _exclusion_config()
         result = filter_universe(_empty_universe_df())
         assert len(result) == 0
         assert set(result.columns) == set(UNIVERSE_COLUMNS)
 
-    def test_index_reset_after_filtering(self) -> None:
+    @patch("data_acquisition.universe.get_config")
+    def test_index_reset_after_filtering(self, mock_cfg) -> None:
         """Returned DataFrame must have a clean 0-based integer index."""
+        mock_cfg.return_value = _exclusion_config()
         df = pd.concat([
             _make_universe_df(["AAPL"]),
             _make_universe_df(["JPM"], sector="Financial Services"),
@@ -218,6 +302,103 @@ class TestFilterUniverseExcludeFinancials:
         ], ignore_index=True)
         result = filter_universe(df)
         assert list(result.index) == list(range(len(result)))
+
+
+# ---------------------------------------------------------------------------
+# filter_universe tests — config-driven behaviour
+# ---------------------------------------------------------------------------
+
+class TestFilterUniverseConfigDriven:
+    """Verify that filter_universe reads ALL exclusion rules from config
+    and does not rely on any hardcoded values.  This ensures compliance
+    with CLAUDE.md's 'no hardcoded thresholds' rule.
+    """
+
+    @patch("data_acquisition.universe.get_config")
+    def test_empty_config_excludes_nothing(self, mock_cfg) -> None:
+        """With no exclusion rules in config, no tickers are removed."""
+        mock_cfg.return_value = _exclusion_config(
+            financial_sector_label="",
+            sectors=[],
+            industry_keywords=[],
+        )
+        df = _make_universe_df(
+            ["JPM", "BAC"], sector="Financial Services", industry="Banks"
+        )
+        result = filter_universe(df)
+        assert len(result) == 2
+
+    @patch("data_acquisition.universe.get_config")
+    def test_custom_sector_label_excludes(self, mock_cfg) -> None:
+        """A non-default financial_sector_label value is honoured."""
+        mock_cfg.return_value = _exclusion_config(
+            financial_sector_label="Finanzdienstleistungen",
+            industry_keywords=[],
+        )
+        df = _make_universe_df(["DBK"], sector="Finanzdienstleistungen")
+        result = filter_universe(df)
+        assert len(result) == 0
+
+    @patch("data_acquisition.universe.get_config")
+    def test_extra_sectors_from_config_excluded(self, mock_cfg) -> None:
+        """Sectors listed in exclusions.sectors are excluded in addition
+        to financial_sector_label."""
+        mock_cfg.return_value = _exclusion_config(
+            sectors=["Utilities", "Real Estate"],
+            industry_keywords=[],
+        )
+        df = _make_universe_df(["NEE"], sector="Utilities", industry="Electric Power")
+        result = filter_universe(df)
+        assert len(result) == 0
+
+    @patch("data_acquisition.universe.get_config")
+    def test_custom_industry_keywords_from_config(self, mock_cfg) -> None:
+        """Custom industry keywords from config are used for substring matching."""
+        mock_cfg.return_value = _exclusion_config(
+            financial_sector_label="",
+            industry_keywords=["Crypto", "Cannabis"],
+        )
+        df = _make_universe_df(["MARA"], sector="Technology", industry="Crypto Mining")
+        result = filter_universe(df)
+        assert len(result) == 0
+
+    @patch("data_acquisition.universe.get_config")
+    def test_industry_keyword_does_not_match_when_absent(self, mock_cfg) -> None:
+        """Industry without matching keyword is not excluded."""
+        mock_cfg.return_value = _exclusion_config(
+            industry_keywords=["Banks"],
+        )
+        df = _make_universe_df(["AAPL"], sector="Technology", industry="Software")
+        result = filter_universe(df)
+        assert len(result) == 1
+
+    @patch("data_acquisition.universe.get_config")
+    def test_sector_and_industry_or_logic(self, mock_cfg) -> None:
+        """A ticker matching EITHER sector OR industry rule is excluded."""
+        mock_cfg.return_value = _exclusion_config(
+            financial_sector_label="Financial Services",
+            industry_keywords=["Mining"],
+        )
+        # Excluded by sector (not industry)
+        fin = _make_universe_df(["JPM"], sector="Financial Services", industry="Software")
+        # Excluded by industry (not sector)
+        mining = _make_universe_df(["VALE"], sector="Materials", industry="Iron Mining")
+        # Not excluded by either
+        tech = _make_universe_df(["AAPL"], sector="Technology", industry="Software")
+        mixed = pd.concat([fin, mining, tech], ignore_index=True)
+        result = filter_universe(mixed)
+        assert set(result["ticker"]) == {"AAPL"}
+
+    @patch("data_acquisition.universe.get_config")
+    def test_industry_keyword_case_insensitive(self, mock_cfg) -> None:
+        """Industry keyword matching must be case-insensitive."""
+        mock_cfg.return_value = _exclusion_config(
+            financial_sector_label="",
+            industry_keywords=["banks"],  # lower-case in config
+        )
+        df = _make_universe_df(["TD"], sector="Finance", industry="REGIONAL BANKS")
+        result = filter_universe(df)
+        assert len(result) == 0
 
 
 # ---------------------------------------------------------------------------

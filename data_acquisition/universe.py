@@ -2,18 +2,35 @@
 
 Fetches all actively-traded securities meeting the minimum market-cap threshold
 across the configured exchanges (TSX, NYSE, NASDAQ, or any subset), applies
-sector/SIC exclusions, and persists the result to a Parquet cache.
+sector/industry exclusions, and persists the result to a Parquet cache.
 
 Authoritative spec: docs/DATA_SOURCES.md §1, §10.
 All thresholds and exchange lists come from config/filter_config.yaml at runtime
 via screener.filter_config_loader.
+
+Data lineage contract
+---------------------
+Upstream dependencies:
+  api_config.py        → build_fmp_url, fmp_limiter, resilient_request
+  filter_config_loader → get_config (for universe, exclusions config sections)
+
+Config dependency map (all from config/filter_config.yaml):
+  universe.exchanges           → fetch_universe (which exchanges to query)
+  universe.min_market_cap_usd  → fetch_universe (marketCapMoreThan param)
+  exclusions.financial_sector_label → filter_universe (sector exclusion)
+  exclusions.sectors           → filter_universe (additional sector exclusion)
+  exclusions.industry_keywords → filter_universe (industry keyword exclusion)
+
+Downstream consumers:
+  store.py             → writes universe DataFrame to DuckDB universe table
+  screener/exclusions.py → applies finer-grained SIC/sector/industry/flag filters
 
 Key exports
 -----------
 fetch_universe() -> pd.DataFrame
     Hit FMP /stock-screener, one exchange at a time, return merged DataFrame.
 filter_universe(df) -> pd.DataFrame
-    Remove excluded sectors / industries.
+    Remove excluded sectors / industries (reads rules from config).
 get_universe(use_cache=True) -> pd.DataFrame
     Orchestrator: cache-read or fetch-then-cache.
 """
@@ -52,6 +69,7 @@ UNIVERSE_COLUMNS: tuple[str, ...] = (
 _FMP_SCREENER_LIMIT = 10_000
 
 #: Age in seconds beyond which the cached universe file is considered stale.
+#: Not currently in config; could be added as universe.cache_ttl_days.
 _CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
 #: FMP exchange identifiers. Keys are canonical config names; values are the
@@ -75,23 +93,6 @@ _FMP_FIELD_MAP: dict[str, str] = {
     "country": "country",
     "exchangeShortName": "exchange",
 }
-
-# Sector + industry keyword exclusions derived from config.exclusions.sectors
-# and the financial industry keywords corresponding to SIC exclusion ranges.
-# These are applied when FMP does not return a direct SIC code.
-_EXCLUDED_SECTOR_NAMES: tuple[str, ...] = (
-    "Financial Services",
-    "Financials",
-)
-_EXCLUDED_INDUSTRY_KEYWORDS: tuple[str, ...] = (
-    "Bank",
-    "Insurance",
-    "REIT",
-    "Mortgage",
-    "Savings",
-    "Investment Trust",
-)
-
 
 # ---------------------------------------------------------------------------
 # Public functions
@@ -182,17 +183,19 @@ def filter_universe(df: pd.DataFrame) -> pd.DataFrame:
     """Remove tickers in excluded sectors/industries from the universe DataFrame.
 
     Uses sector and industry strings from FMP because FMP's stock screener does
-    not return SIC codes directly. The exclusion criteria mirror the SIC ranges
+    not return SIC codes directly.  The exclusion criteria mirror the SIC ranges
     in ``config.exclusions.sic_codes`` (see docs/DATA_SOURCES.md §10).
 
-    Excluded by sector name match (case-insensitive):
-        "Financial Services", "Financials"
+    All exclusion values are read from ``config/filter_config.yaml`` at runtime:
 
-    Excluded by industry keyword (case-insensitive substring match):
-        "Bank", "Insurance", "REIT", "Mortgage", "Savings", "Investment Trust"
+    * **Sector exclusion** (case-insensitive exact match):
+      ``exclusions.financial_sector_label`` + ``exclusions.sectors``
+    * **Industry exclusion** (case-insensitive substring match):
+      ``exclusions.industry_keywords``
 
-    Additional sector names listed in ``config.exclusions.sectors`` (if non-empty)
-    are also excluded.
+    A row is removed if it matches either the sector or industry rule (OR logic).
+    This is intentionally broad; ``screener/exclusions.py`` applies finer-grained
+    SIC + sector + industry + flag checks on the surviving set.
 
     Parameters
     ----------
@@ -211,22 +214,38 @@ def filter_universe(df: pd.DataFrame) -> pd.DataFrame:
     - WARNING: if ``sector`` or ``industry`` column is missing (skips that check).
     """
     cfg = get_config()
-    extra_sectors: list[str] = [
-        s.strip() for s in cfg.get("exclusions", {}).get("sectors", []) if s.strip()
-    ]
+    excl_cfg: dict[str, Any] = cfg.get("exclusions", {})
 
-    excluded_sectors = set(s.lower() for s in _EXCLUDED_SECTOR_NAMES)
+    # --- Build excluded-sectors set from config ---
+    # Primary financial sector label (e.g. "Financial Services")
+    financial_label: str = excl_cfg.get("financial_sector_label", "")
+    # Additional GICS sector names (e.g. ["Financials", "Utilities", "Real Estate"])
+    extra_sectors: list[str] = [
+        s.strip() for s in excl_cfg.get("sectors", []) if s and str(s).strip()
+    ]
+    excluded_sectors: set[str] = set()
+    if financial_label.strip():
+        excluded_sectors.add(financial_label.strip().lower())
     excluded_sectors.update(s.lower() for s in extra_sectors)
+
+    # --- Build industry keyword list from config ---
+    # Keywords like "Banks", "Insurance", "REIT" — substring match against industry
+    industry_keywords: list[str] = [
+        str(k).strip()
+        for k in excl_cfg.get("industry_keywords", [])
+        if k and str(k).strip()
+    ]
 
     original_count = len(df)
     mask_keep = pd.Series(True, index=df.index)
 
+    # --- Sector filter ---
     if "sector" not in df.columns:
         logger.warning("filter_universe: 'sector' column missing — skipping sector exclusion.")
-    else:
+    elif excluded_sectors:
         sector_lower = df["sector"].fillna("").str.lower()
         sector_mask = sector_lower.isin(excluded_sectors)
-        n_sector = sector_mask.sum()
+        n_sector = int(sector_mask.sum())
         if n_sector:
             logger.info(
                 "filter_universe: removing %d tickers by sector exclusion %s.",
@@ -235,16 +254,17 @@ def filter_universe(df: pd.DataFrame) -> pd.DataFrame:
             )
         mask_keep &= ~sector_mask
 
+    # --- Industry keyword filter ---
     if "industry" not in df.columns:
         logger.warning(
             "filter_universe: 'industry' column missing — skipping industry exclusion."
         )
-    else:
+    elif industry_keywords:
         industry_lower = df["industry"].fillna("").str.lower()
         industry_mask = pd.Series(False, index=df.index)
-        for keyword in _EXCLUDED_INDUSTRY_KEYWORDS:
+        for keyword in industry_keywords:
             kw_mask = industry_lower.str.contains(keyword.lower(), regex=False)
-            n_kw = (kw_mask & mask_keep).sum()
+            n_kw = int((kw_mask & mask_keep).sum())
             if n_kw:
                 logger.info(
                     "filter_universe: removing %d tickers matching industry keyword '%s'.",

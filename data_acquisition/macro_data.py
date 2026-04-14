@@ -12,9 +12,30 @@ Unit conventions (docs/DATA_SOURCES.md §11):
 - ``usd_cad_rate``: USD per 1 CAD from FRED ``DEXCAUS`` (e.g. 0.74); use directly.
 - FRED ``"."`` missing-value markers are replaced with ``float("nan")``.
 
+Data lineage contract
+---------------------
+Upstream dependencies:
+  api_config.py          → fred_limiter, get_fred_key, resilient_request
+  filter_config_loader   → get_config (for data_sources.fred.base_url,
+                            data_sources.fred.series.treasury_10yr,
+                            data_sources.fred.series.usd_cad)
+
+Config dependency map (all from config/filter_config.yaml):
+  data_sources.fred.base_url          → _fetch_fred_latest (FRED endpoint URL)
+  data_sources.fred.rate_limit_per_min→ fred_limiter (initialised in api_config.py)
+  data_sources.fred.series.treasury_10yr → _fetch_all_macro_series (DGS10)
+  data_sources.fred.series.usd_cad   → _fetch_all_macro_series (DEXCAUS)
+
+Downstream consumers:
+  store.py               → writes macro_data dict as key-value rows to DuckDB
+  metrics_engine/        → reads us_treasury_10yr for F14 (DCF discount rate),
+                            F16 (earnings yield spread)
+  valuation_reports/     → reads us_treasury_10yr for risk-free rate, usd_cad_rate
+                            for CAD conversion in recommendations
+
 Key exports
 -----------
-fetch_macro_data() -> dict
+fetch_macro_data(use_cache) -> dict
     Fetch (or load from cache) macro indicators.
 get_risk_free_rate() -> float
     Return ``us_treasury_10yr`` as a decimal fraction. Used by valuation module.
@@ -59,7 +80,7 @@ _YF_USDCAD_TICKER: str = "CADUSD=X"
 # Public functions
 # ---------------------------------------------------------------------------
 
-def fetch_macro_data() -> dict[str, Any]:
+def fetch_macro_data(use_cache: bool = True) -> dict[str, Any]:
     """Fetch macro indicators from FRED, returning cached data if fresh.
 
     Retrieves the following series (FRED primary, yfinance fallback):
@@ -70,6 +91,13 @@ def fetch_macro_data() -> dict[str, Any]:
     - ``as_of_date``: ISO 8601 date string when data was fetched.
 
     Cache location: ``data/raw/macro_data.json``. TTL: 1 day.
+
+    Parameters
+    ----------
+    use_cache:
+        If ``True`` (default) and the cache file is younger than 1 day,
+        return cached data without hitting FRED. Set to ``False`` to force
+        a fresh fetch regardless of cache state.
 
     Returns
     -------
@@ -85,11 +113,11 @@ def fetch_macro_data() -> dict[str, Any]:
       restored as ``float("nan")`` when loaded.
     """
     cache_path = _resolve_macro_cache_path()
-    if _macro_cache_is_fresh(cache_path):
+    if use_cache and _macro_cache_is_fresh(cache_path):
         logger.info("Loading macro data from cache: %s", cache_path)
         return _load_macro_cache(cache_path)
 
-    logger.info("Fetching fresh macro data from FRED.")
+    logger.info("Fetching fresh macro data from FRED (use_cache=%s).", use_cache)
     result = _fetch_all_macro_series()
     _save_macro_cache(result, cache_path)
     return result

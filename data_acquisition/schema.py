@@ -90,11 +90,33 @@ class LineItem:
 # LINE_ITEM_MAP  — 14 canonical entries per docs/DATA_SOURCES.md §3
 # ---------------------------------------------------------------------------
 #
+# Data lineage contract:
+#   schema.py (defines canonical names)
+#     → financials.py (resolves raw API → canonical via resolve_all_fields)
+#     → store.py DDL (DuckDB table columns == CANONICAL_COLUMNS values)
+#     → metrics_engine/ (reads canonical columns from DuckDB)
+#     → screener/ (ranks using metrics_engine output)
+#
 # The 14 entries correspond exactly to the required line items listed in the
 # task specification: net_income, depreciation_amortization, capital_expenditures,
 # total_revenue, gross_profit, sga, operating_income, interest_expense,
 # long_term_debt, shareholders_equity, eps_diluted, shares_outstanding_diluted,
 # treasury_stock, working_capital_change.
+#
+# Statement grouping (must match store.py _TABLE_DDL):
+#   income_statement (8): net_income, total_revenue, gross_profit, sga,
+#       operating_income, interest_expense, eps_diluted, shares_outstanding_diluted
+#   balance_sheet    (3): long_term_debt, shareholders_equity, treasury_stock
+#   cash_flow        (3): depreciation_amortization, capital_expenditures,
+#       working_capital_change
+#
+# Drop-required fields (10 of 14 — drop_if_missing=True):
+#   net_income, depreciation_amortization, capital_expenditures, total_revenue,
+#   gross_profit, operating_income, long_term_debt, shareholders_equity,
+#   eps_diluted, shares_outstanding_diluted
+#
+# Flag-only fields (4 of 14 — drop_if_missing=False):
+#   sga, interest_expense, treasury_stock, working_capital_change
 #
 # yfinance candidate labels are included as additional substitutes after FMP
 # substitutes, because financials.py falls back to yfinance when FMP is
@@ -379,6 +401,14 @@ LINE_ITEM_MAP: dict[str, LineItem] = {
 # Currently an identity mapping (buffett_name == column name). Kept as a
 # separate dict so downstream code has a single import point and any future
 # column rename only requires changing this dict, not every consumer.
+#
+# Consumers of this mapping:
+#   - financials.py: uses CANONICAL_COLUMNS[buffett_name] as the output column
+#     name when building normalised DataFrames.
+#   - store.py: DDL column names MUST match the values in this dict. Any
+#     rename here requires a corresponding DDL migration in store.py.
+#   - metrics_engine/: reads these column names from DuckDB via store.read_table.
+#   - tests/: verify alignment between CANONICAL_COLUMNS and store DDL.
 
 CANONICAL_COLUMNS: dict[str, str] = {name: name for name in LINE_ITEM_MAP}
 

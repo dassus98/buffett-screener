@@ -2,7 +2,8 @@
 data sources used by the buffett-screener pipeline.
 
 Authoritative spec: docs/DATA_SOURCES.md §1–2.
-Rate limit values and base URLs come from config/filter_config.yaml at import time.
+Rate limit values, base URLs, retry parameters, and backoff configuration come from
+config/filter_config.yaml at import time.
 
 Note on yaml loading
 --------------------
@@ -10,6 +11,25 @@ This is the ONE module in the codebase that calls ``yaml.safe_load`` directly. I
 lowest-level config consumer and must not depend on ``screener/filter_config_loader.py``
 (which would create a circular-dependency path). All other modules must load config
 exclusively via ``filter_config_loader``.
+
+Data lineage contract
+---------------------
+api_config.py (defines rate limiters, resilient_request, build_fmp_url)
+  → universe.py       (imports build_fmp_url, fmp_limiter, resilient_request)
+  → financials.py     (imports build_fmp_url, fmp_limiter, resilient_request)
+  → macro_data.py     (imports fred_limiter, get_fred_key, resilient_request)
+
+Config dependency map (all from config/filter_config.yaml):
+  data_sources.fmp.base_url           → build_fmp_url
+  data_sources.fmp.rate_limit_per_min → fmp_limiter
+  data_sources.fred.rate_limit_per_min→ fred_limiter
+  data_sources.retry.max_attempts     → resilient_request default max_retries
+  data_sources.retry.base_wait_seconds→ exponential backoff base
+  data_sources.retry.retry_on_status  → retryable HTTP status codes
+
+API keys (from .env via python-dotenv):
+  FMP_API_KEY  → get_fmp_key(), build_fmp_url()
+  FRED_API_KEY → get_fred_key()
 
 Key exports
 -----------
@@ -38,7 +58,6 @@ import threading
 import time
 from collections import deque
 from typing import Any
-from urllib.parse import urljoin
 
 import requests
 import yaml
@@ -220,16 +239,30 @@ class RateLimiter:
 
 
 # ---------------------------------------------------------------------------
-# resilient_request
+# resilient_request — retry configuration from filter_config.yaml
 # ---------------------------------------------------------------------------
+# All retry parameters are read from config/filter_config.yaml under
+# data_sources.retry.* to comply with the "no hardcoded thresholds" rule
+# (CLAUDE.md). Fallback defaults match DATA_SOURCES.md §2.
+
+_RETRY_CFG: dict[str, Any] = _DATA_SOURCES.get("retry", {})
 
 #: HTTP status codes that warrant a retry with exponential backoff.
-_RETRY_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+#: Read from config data_sources.retry.retry_on_status.
+_RETRY_STATUSES: frozenset[int] = frozenset(
+    int(s) for s in _RETRY_CFG.get("retry_on_status", [429, 500, 502, 503, 504])
+)
 
-#: Seconds to wait before each retry attempt (index = attempt number, 0-based).
-_BACKOFF_SECONDS: tuple[float, ...] = (1.0, 2.0, 4.0)
+#: Base wait time in seconds for exponential backoff (wait = base × 2^attempt).
+#: Read from config data_sources.retry.base_wait_seconds.
+_BASE_WAIT_SECONDS: float = float(_RETRY_CFG.get("base_wait_seconds", 1.0))
+
+#: Default max retries before giving up. Total attempts = max_retries + 1.
+#: Read from config data_sources.retry.max_attempts.
+_MAX_RETRIES: int = int(_RETRY_CFG.get("max_attempts", 3))
 
 #: Default per-request timeout in seconds.
+#: Not currently in config; could be added as data_sources.retry.request_timeout_seconds.
 _REQUEST_TIMEOUT: int = 30
 
 
@@ -237,7 +270,7 @@ def resilient_request(
     url: str,
     params: dict[str, Any] | None = None,
     rate_limiter: RateLimiter | None = None,
-    max_retries: int = 3,
+    max_retries: int = _MAX_RETRIES,
 ) -> dict[str, Any] | list[Any]:
     """Make a GET request with rate limiting and exponential-backoff retry logic.
 
@@ -254,9 +287,9 @@ def resilient_request(
         ``wait_if_needed()`` is called before every attempt (including retries).
     max_retries:
         Maximum number of retry attempts after the initial request failure.
-        Total attempts = ``max_retries + 1``. Read from
-        ``config/filter_config.yaml`` ``data_sources.retry.max_attempts`` for
-        the default; callers may override.
+        Total attempts = ``max_retries + 1``. Default read from
+        ``config/filter_config.yaml`` ``data_sources.retry.max_attempts``;
+        callers may override per-call.
 
     Returns
     -------
@@ -277,7 +310,8 @@ def resilient_request(
     -----
     - URL is logged at DEBUG level with the ``apikey`` param redacted.
     - Every retry is logged at WARNING level with the attempt number and status.
-    - Backoff schedule: 1 s → 2 s → 4 s (configurable via ``_BACKOFF_SECONDS``).
+    - Backoff: ``base_wait_seconds × 2^attempt`` (base from config; default 1 s → 2 s → 4 s).
+    - Retryable statuses: read from ``data_sources.retry.retry_on_status`` in config.
     """
     params = params or {}
     safe_url = _redact_key(url, params)
@@ -353,6 +387,12 @@ def resilient_request(
 def _backoff_wait(attempt: int) -> float:
     """Return the backoff sleep duration for a given attempt index (0-based).
 
+    Uses exponential backoff: ``_BASE_WAIT_SECONDS × 2^attempt``.
+    The base is read from ``config/filter_config.yaml``
+    ``data_sources.retry.base_wait_seconds`` (default: 1.0).
+
+    With base=1.0: attempt 0 → 1 s, attempt 1 → 2 s, attempt 2 → 4 s, ...
+
     Parameters
     ----------
     attempt:
@@ -363,8 +403,7 @@ def _backoff_wait(attempt: int) -> float:
     float
         Seconds to sleep before the next attempt.
     """
-    idx = min(attempt, len(_BACKOFF_SECONDS) - 1)
-    return _BACKOFF_SECONDS[idx]
+    return _BASE_WAIT_SECONDS * (2 ** attempt)
 
 
 def _redact_key(url: str, params: dict[str, Any]) -> str:
@@ -438,6 +477,9 @@ def build_fmp_url(endpoint: str, **params: Any) -> tuple[str, dict[str, Any]]:
 
 # ---------------------------------------------------------------------------
 # Preconfigured limiter instances
+# Consumers:
+#   fmp_limiter  → universe.py, financials.py
+#   fred_limiter → macro_data.py
 # ---------------------------------------------------------------------------
 
 def _fmp_rate_limit() -> int:

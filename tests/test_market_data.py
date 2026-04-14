@@ -794,3 +794,228 @@ class TestGetUsdCadRate:
         mock_fetch.return_value = {"usd_cad_rate": None, "as_of_date": "2024-01-01"}
         rate = get_usd_cad_rate()
         assert math.isnan(rate)
+
+
+# ===========================================================================
+# Tests: fetch_macro_data use_cache parameter
+# ===========================================================================
+
+class TestFetchMacroDataUseCache:
+    """fetch_macro_data(use_cache=False) must bypass the cache entirely."""
+
+    @patch("data_acquisition.macro_data._save_macro_cache")
+    @patch("data_acquisition.macro_data._resolve_macro_cache_path")
+    @patch("data_acquisition.macro_data._macro_cache_is_fresh", return_value=True)
+    @patch("data_acquisition.macro_data._load_macro_cache")
+    @patch("data_acquisition.macro_data._fetch_all_macro_series")
+    def test_use_cache_false_skips_fresh_cache(
+        self,
+        mock_fetch: MagicMock,
+        mock_load: MagicMock,
+        mock_fresh: MagicMock,
+        mock_path: MagicMock,
+        mock_save: MagicMock,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """Even if cache is fresh, use_cache=False must trigger a fresh fetch."""
+        mock_path.return_value = tmp_path / "macro_data.json"
+        fresh_data = {
+            "us_treasury_10yr": 0.045,
+            "usd_cad_rate": 0.73,
+            "as_of_date": "2024-02-01",
+        }
+        mock_fetch.return_value = fresh_data
+
+        result = fetch_macro_data(use_cache=False)
+
+        # _load_macro_cache should NOT be called when use_cache=False.
+        mock_load.assert_not_called()
+        # _fetch_all_macro_series should be called instead.
+        mock_fetch.assert_called_once()
+        assert result == fresh_data
+
+    @patch("data_acquisition.macro_data._save_macro_cache")
+    @patch("data_acquisition.macro_data._resolve_macro_cache_path")
+    @patch("data_acquisition.macro_data._macro_cache_is_fresh", return_value=True)
+    @patch("data_acquisition.macro_data._load_macro_cache")
+    @patch("data_acquisition.macro_data._fetch_all_macro_series")
+    def test_use_cache_true_uses_fresh_cache(
+        self,
+        mock_fetch: MagicMock,
+        mock_load: MagicMock,
+        mock_fresh: MagicMock,
+        mock_path: MagicMock,
+        mock_save: MagicMock,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """use_cache=True (default) should load from cache when fresh."""
+        mock_path.return_value = tmp_path / "macro_data.json"
+        cached_data = {
+            "us_treasury_10yr": 0.042,
+            "usd_cad_rate": 0.74,
+            "as_of_date": "2024-01-01",
+        }
+        mock_load.return_value = cached_data
+
+        result = fetch_macro_data(use_cache=True)
+
+        mock_load.assert_called_once()
+        mock_fetch.assert_not_called()
+        assert result == cached_data
+
+    @patch("data_acquisition.macro_data._save_macro_cache")
+    @patch("data_acquisition.macro_data._resolve_macro_cache_path")
+    @patch("data_acquisition.macro_data._macro_cache_is_fresh", return_value=False)
+    @patch("data_acquisition.macro_data._fetch_all_macro_series")
+    def test_use_cache_true_stale_cache_fetches(
+        self,
+        mock_fetch: MagicMock,
+        mock_fresh: MagicMock,
+        mock_path: MagicMock,
+        mock_save: MagicMock,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """use_cache=True with a stale cache still triggers a fresh fetch."""
+        mock_path.return_value = tmp_path / "macro_data.json"
+        fresh_data = {
+            "us_treasury_10yr": 0.044,
+            "usd_cad_rate": 0.72,
+            "as_of_date": "2024-02-02",
+        }
+        mock_fetch.return_value = fresh_data
+
+        result = fetch_macro_data(use_cache=True)
+
+        mock_fetch.assert_called_once()
+        assert result == fresh_data
+
+
+# ===========================================================================
+# Tests: config-driven FRED series IDs
+# ===========================================================================
+
+class TestFredConfigDriven:
+    """Verify FRED series IDs and base URL are read from config, not hardcoded."""
+
+    @patch("data_acquisition.macro_data._fetch_yf_treasury_fallback")
+    @patch("data_acquisition.macro_data._fetch_yf_usdcad_fallback")
+    @patch("data_acquisition.macro_data._fetch_fred_latest")
+    @patch("data_acquisition.macro_data.get_config")
+    def test_series_ids_read_from_config(
+        self,
+        mock_config: MagicMock,
+        mock_fred: MagicMock,
+        mock_usd_fallback: MagicMock,
+        mock_tsy_fallback: MagicMock,
+    ) -> None:
+        """_fetch_all_macro_series must use series IDs from config, not hardcoded."""
+        mock_config.return_value = {
+            "data_sources": {
+                "fred": {
+                    "series": {
+                        "treasury_10yr": "CUSTOM_TSY",
+                        "usd_cad": "CUSTOM_FX",
+                    },
+                },
+            },
+        }
+        mock_fred.side_effect = [4.25, 0.74]
+
+        _fetch_all_macro_series()
+
+        # Verify the custom series IDs were passed to _fetch_fred_latest.
+        calls = [c[0][0] for c in mock_fred.call_args_list]
+        assert calls[0] == "CUSTOM_TSY"
+        assert calls[1] == "CUSTOM_FX"
+
+    @patch("data_acquisition.macro_data._fetch_yf_treasury_fallback")
+    @patch("data_acquisition.macro_data._fetch_yf_usdcad_fallback")
+    @patch("data_acquisition.macro_data._fetch_fred_latest")
+    @patch("data_acquisition.macro_data.get_config")
+    def test_defaults_to_standard_series_when_config_absent(
+        self,
+        mock_config: MagicMock,
+        mock_fred: MagicMock,
+        mock_usd_fallback: MagicMock,
+        mock_tsy_fallback: MagicMock,
+    ) -> None:
+        """When config lacks series keys, fall back to DGS10 and DEXCAUS."""
+        mock_config.return_value = {"data_sources": {"fred": {}}}
+        mock_fred.side_effect = [4.25, 0.74]
+
+        _fetch_all_macro_series()
+
+        calls = [c[0][0] for c in mock_fred.call_args_list]
+        assert calls[0] == "DGS10"
+        assert calls[1] == "DEXCAUS"
+
+    @patch("data_acquisition.macro_data.resilient_request")
+    @patch("data_acquisition.macro_data.get_fred_key", return_value="test_key")
+    @patch("data_acquisition.macro_data.get_config")
+    def test_base_url_read_from_config(
+        self,
+        mock_config: MagicMock,
+        mock_key: MagicMock,
+        mock_request: MagicMock,
+    ) -> None:
+        """_fetch_fred_latest must use base_url from config, not hardcoded."""
+        mock_config.return_value = {
+            "data_sources": {
+                "fred": {
+                    "base_url": "https://custom-fred.example.com/api",
+                },
+            },
+        }
+        mock_request.return_value = _make_fred_response("4.10")
+
+        _fetch_fred_latest("DGS10")
+
+        # The first positional arg to resilient_request should be the custom URL.
+        actual_url = mock_request.call_args[0][0]
+        assert actual_url == "https://custom-fred.example.com/api"
+
+    @patch("data_acquisition.macro_data.resilient_request")
+    @patch("data_acquisition.macro_data.get_fred_key", return_value="test_key")
+    @patch("data_acquisition.macro_data.get_config")
+    def test_default_base_url_when_config_absent(
+        self,
+        mock_config: MagicMock,
+        mock_key: MagicMock,
+        mock_request: MagicMock,
+    ) -> None:
+        """Without base_url in config, fall back to the standard FRED endpoint."""
+        mock_config.return_value = {"data_sources": {"fred": {}}}
+        mock_request.return_value = _make_fred_response("3.95")
+
+        _fetch_fred_latest("DGS10")
+
+        actual_url = mock_request.call_args[0][0]
+        assert "api.stlouisfed.org" in actual_url
+
+    @patch("data_acquisition.macro_data.resilient_request")
+    @patch("data_acquisition.macro_data.get_fred_key", return_value="test_key")
+    @patch("data_acquisition.macro_data.get_config")
+    def test_fred_limiter_passed_to_resilient_request(
+        self,
+        mock_config: MagicMock,
+        mock_key: MagicMock,
+        mock_request: MagicMock,
+    ) -> None:
+        """_fetch_fred_latest must pass fred_limiter to resilient_request."""
+        mock_config.return_value = {
+            "data_sources": {
+                "fred": {
+                    "base_url": "https://api.stlouisfed.org/fred/series/observations",
+                },
+            },
+        }
+        mock_request.return_value = _make_fred_response("4.00")
+
+        _fetch_fred_latest("DGS10")
+
+        # Verify rate_limiter kwarg was passed.
+        _, kwargs = mock_request.call_args
+        assert "rate_limiter" in kwargs
+        # fred_limiter should be an instance of RateLimiter.
+        from data_acquisition.api_config import RateLimiter
+        assert isinstance(kwargs["rate_limiter"], RateLimiter)

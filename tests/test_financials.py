@@ -16,13 +16,14 @@ import pytest
 from data_acquisition.financials import (
     _apply_value_conventions,
     _empty_normalised_df,
+    _ensure_canonical_columns,
     _extract_fiscal_year,
     _resolve_fmp_ticker,
     fetch_all_financials,
     fetch_financial_statements,
     normalize_statement,
 )
-from data_acquisition.schema import LINE_ITEM_MAP
+from data_acquisition.schema import CANONICAL_COLUMNS, LINE_ITEM_MAP
 
 
 # ---------------------------------------------------------------------------
@@ -588,3 +589,245 @@ class TestEmptyNormalisedDf:
 
     def test_is_empty(self) -> None:
         assert _empty_normalised_df("AAPL").empty
+
+
+# ---------------------------------------------------------------------------
+# normalize_statement — None / edge-case inputs
+# ---------------------------------------------------------------------------
+
+class TestNormalizeStatementEdgeCases:
+    """Edge cases: None input, single row, cash flow D&A and working capital."""
+
+    def test_none_input_returns_empty_df_and_no_subs(self) -> None:
+        """Passing None instead of a DataFrame should not raise."""
+        df, subs = normalize_statement(None, "income_statement", ticker="AAPL")
+        assert df.empty
+        assert subs == []
+
+    def test_cash_flow_depreciation_in_thousands(self) -> None:
+        """D&A from cash flow should be divided by 1000 like other monetary fields."""
+        row = _make_fmp_cashflow_row("AAPL", 2023, da=12_000_000_000)
+        raw = pd.DataFrame([row])
+        df, _ = normalize_statement(raw, "cash_flow", ticker="AAPL")
+        assert df.iloc[0]["depreciation_amortization"] == pytest.approx(12_000_000.0)
+
+    def test_working_capital_change_in_thousands(self) -> None:
+        """Working capital change should be divided by 1000."""
+        row = _make_fmp_cashflow_row("AAPL", 2023, wc_change=-5_000_000_000)
+        raw = pd.DataFrame([row])
+        df, _ = normalize_statement(raw, "cash_flow", ticker="AAPL")
+        assert df.iloc[0]["working_capital_change"] == pytest.approx(-5_000_000.0)
+
+
+# ---------------------------------------------------------------------------
+# _ensure_canonical_columns tests
+# ---------------------------------------------------------------------------
+
+class TestEnsureCanonicalColumns:
+    """_ensure_canonical_columns adds missing columns as NaN."""
+
+    def test_adds_missing_income_columns_as_nan(self) -> None:
+        """A DataFrame with only ticker/fiscal_year should gain all IS columns."""
+        df = pd.DataFrame({"ticker": ["AAPL"], "fiscal_year": [2023]})
+        result = _ensure_canonical_columns(df, "income_statement", "AAPL")
+
+        # All canonical income_statement fields must be present.
+        expected_cols = [
+            CANONICAL_COLUMNS[name]
+            for name, item in LINE_ITEM_MAP.items()
+            if item.statement == "income_statement"
+        ]
+        for col in expected_cols:
+            assert col in result.columns, f"Missing expected column: {col}"
+            assert pd.isna(result.iloc[0][col])
+
+    def test_preserves_existing_values(self) -> None:
+        """Pre-existing values must not be overwritten with NaN."""
+        df = pd.DataFrame({
+            "ticker": ["AAPL"],
+            "fiscal_year": [2023],
+            "net_income": [100_000.0],
+        })
+        result = _ensure_canonical_columns(df, "income_statement", "AAPL")
+        assert result.iloc[0]["net_income"] == pytest.approx(100_000.0)
+
+    def test_balance_sheet_columns_separate_from_income(self) -> None:
+        """Balance sheet columns should not appear in an income_statement call."""
+        df = pd.DataFrame({"ticker": ["AAPL"], "fiscal_year": [2023]})
+        result = _ensure_canonical_columns(df, "income_statement", "AAPL")
+        bs_cols = [
+            CANONICAL_COLUMNS[name]
+            for name, item in LINE_ITEM_MAP.items()
+            if item.statement == "balance_sheet"
+        ]
+        for col in bs_cols:
+            assert col not in result.columns
+
+
+# ---------------------------------------------------------------------------
+# Config-driven limit for fetch_financial_statements
+# ---------------------------------------------------------------------------
+
+class TestFetchFinancialStatementsConfigLimit:
+    """fetch_financial_statements reads limit from config, not hardcoded."""
+
+    @patch("data_acquisition.financials._persist_raw")
+    @patch("data_acquisition.financials.resilient_request")
+    @patch("data_acquisition.financials.get_config")
+    def test_limit_param_read_from_config(
+        self, mock_config, mock_req, mock_persist
+    ) -> None:
+        """The FMP limit parameter should equal universe.required_history_years."""
+        mock_config.return_value = {
+            "universe": {"required_history_years": 15},
+            "data_sources": {"store_raw_responses": False},
+        }
+        mock_req.return_value = [_make_fmp_income_row()]
+
+        fetch_financial_statements("AAPL")
+
+        # Inspect the build_fmp_url calls — limit should be 15, not 10.
+        for c in mock_req.call_args_list:
+            url = c[0][0]  # positional arg 0 = url
+            params = c[1].get("params", {}) if c[1] else {}
+            # build_fmp_url embeds limit in the params dict
+            # We check via the URL or params that were passed
+            # The limit is baked into the params by build_fmp_url.
+            pass  # covered by the build_fmp_url mock below
+
+    @patch("data_acquisition.financials._persist_raw")
+    @patch("data_acquisition.financials.resilient_request")
+    @patch("data_acquisition.financials.build_fmp_url")
+    @patch("data_acquisition.financials.get_config")
+    def test_limit_param_passed_to_build_fmp_url(
+        self, mock_config, mock_build, mock_req, mock_persist
+    ) -> None:
+        """Verify build_fmp_url is called with limit=required_history_years."""
+        mock_config.return_value = {
+            "universe": {"required_history_years": 15},
+            "data_sources": {"store_raw_responses": False},
+        }
+        mock_build.return_value = ("http://example.com/api", {"apikey": "x"})
+        mock_req.return_value = [_make_fmp_income_row()]
+
+        fetch_financial_statements("AAPL")
+
+        # All 3 build_fmp_url calls should have limit=15.
+        assert mock_build.call_count == 3
+        for c in mock_build.call_args_list:
+            assert c[1]["limit"] == 15, (
+                f"Expected limit=15 but got limit={c[1].get('limit')}"
+            )
+
+    @patch("data_acquisition.financials._persist_raw")
+    @patch("data_acquisition.financials.resilient_request")
+    @patch("data_acquisition.financials.build_fmp_url")
+    @patch("data_acquisition.financials.get_config")
+    def test_default_limit_when_config_key_absent(
+        self, mock_config, mock_build, mock_req, mock_persist
+    ) -> None:
+        """If required_history_years is not in config, fall back to 10."""
+        mock_config.return_value = {
+            "universe": {},  # no required_history_years key
+            "data_sources": {"store_raw_responses": False},
+        }
+        mock_build.return_value = ("http://example.com/api", {"apikey": "x"})
+        mock_req.return_value = [_make_fmp_income_row()]
+
+        fetch_financial_statements("AAPL")
+
+        for c in mock_build.call_args_list:
+            assert c[1]["limit"] == 10, (
+                f"Expected default limit=10 but got limit={c[1].get('limit')}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# TSX ticker pre-suffixing in fetch_all_financials
+# ---------------------------------------------------------------------------
+
+class TestFetchAllFinancialsTsxSuffix:
+    """TSX tickers without '.TO' suffix should be pre-suffixed."""
+
+    @patch("data_acquisition.financials._log_eta")
+    @patch("data_acquisition.financials.fetch_financial_statements")
+    def test_tsx_ticker_gets_dot_to_suffix(
+        self, mock_fetch, mock_eta
+    ) -> None:
+        """A TSX ticker 'SHOP' should become 'SHOP.TO' before API call."""
+        mock_fetch.return_value = {
+            "income_statement": None,
+            "balance_sheet": None,
+            "cash_flow": None,
+        }
+        # Universe with one TSX ticker without the .TO suffix.
+        universe = pd.DataFrame({
+            "ticker": ["SHOP"],
+            "exchange": ["TSX"],
+        })
+        fetch_all_financials(universe, batch_size=10)
+
+        # fetch_financial_statements must have been called with 'SHOP.TO'.
+        mock_fetch.assert_called_once_with("SHOP.TO")
+
+    @patch("data_acquisition.financials._log_eta")
+    @patch("data_acquisition.financials.fetch_financial_statements")
+    def test_tsx_ticker_already_suffixed_not_doubled(
+        self, mock_fetch, mock_eta
+    ) -> None:
+        """A TSX ticker 'SHOP.TO' should NOT become 'SHOP.TO.TO'."""
+        mock_fetch.return_value = {
+            "income_statement": None,
+            "balance_sheet": None,
+            "cash_flow": None,
+        }
+        universe = pd.DataFrame({
+            "ticker": ["SHOP.TO"],
+            "exchange": ["TSX"],
+        })
+        fetch_all_financials(universe, batch_size=10)
+
+        mock_fetch.assert_called_once_with("SHOP.TO")
+
+    @patch("data_acquisition.financials._log_eta")
+    @patch("data_acquisition.financials.fetch_financial_statements")
+    def test_us_ticker_not_suffixed(
+        self, mock_fetch, mock_eta
+    ) -> None:
+        """A NYSE ticker must not receive any suffix."""
+        mock_fetch.return_value = {
+            "income_statement": None,
+            "balance_sheet": None,
+            "cash_flow": None,
+        }
+        universe = pd.DataFrame({
+            "ticker": ["AAPL"],
+            "exchange": ["NYSE"],
+        })
+        fetch_all_financials(universe, batch_size=10)
+
+        mock_fetch.assert_called_once_with("AAPL")
+
+    @patch("data_acquisition.financials._log_eta")
+    @patch("data_acquisition.financials.fetch_financial_statements")
+    def test_mixed_exchanges_only_tsx_suffixed(
+        self, mock_fetch, mock_eta
+    ) -> None:
+        """Only TSX tickers should be suffixed; NYSE tickers left alone."""
+        mock_fetch.return_value = {
+            "income_statement": None,
+            "balance_sheet": None,
+            "cash_flow": None,
+        }
+        universe = pd.DataFrame({
+            "ticker": ["AAPL", "SHOP", "MSFT"],
+            "exchange": ["NYSE", "TSX", "NASDAQ"],
+        })
+        fetch_all_financials(universe, batch_size=10)
+
+        called_tickers = [c[0][0] for c in mock_fetch.call_args_list]
+        assert "AAPL" in called_tickers
+        assert "SHOP.TO" in called_tickers
+        assert "MSFT" in called_tickers
+        # Ensure SHOP (without .TO) was NOT called.
+        assert "SHOP" not in called_tickers

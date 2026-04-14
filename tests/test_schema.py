@@ -1,8 +1,16 @@
 """Unit tests for data_acquisition/schema.py.
 
-Covers: LINE_ITEM_MAP structure, CANONICAL_COLUMNS, resolve_field(), resolve_all_fields(),
-and get_drop_required_fields(). All tests are pure-Python with no I/O or network calls.
+Covers:
+- LINE_ITEM_MAP structure (14 entries, valid enums, correct drop flags)
+- LINE_ITEM_MAP internal consistency (buffett_name == dict key, non-empty notes)
+- CANONICAL_COLUMNS identity mapping
+- resolve_field() — ideal present, substitute fallback, priority ordering,
+  None-value skip, DERIVED sentinel skip, negative values, MISSING/DROP|FLAG
+- resolve_all_fields() — complete row, sparse row with missing critical fields
+- get_drop_required_fields() — correct count, correct membership
+- Data lineage — statement grouping matches DuckDB store DDL expectations
 
+All tests are pure-Python with no I/O or network calls.
 Hand-calculated expectations are documented inline for each test.
 """
 
@@ -438,3 +446,213 @@ class TestGetDropRequiredFields:
                 assert name not in drop_list, (
                     f"{name} has drop_if_missing=False but appears in drop list"
                 )
+
+    def test_exactly_10_drop_required_fields(self) -> None:
+        """There must be exactly 10 fields with drop_if_missing=True.
+
+        These 10 are the critical financial data points without which a
+        security cannot be meaningfully analysed using Buffett's framework.
+        """
+        assert len(get_drop_required_fields()) == 10
+
+
+# ---------------------------------------------------------------------------
+# LINE_ITEM_MAP internal consistency
+# ---------------------------------------------------------------------------
+
+
+class TestLineItemMapConsistency:
+    """Verify internal consistency between dict keys and LineItem attributes."""
+
+    def test_buffett_name_matches_dict_key(self) -> None:
+        """Each LineItem.buffett_name must be identical to its dict key.
+
+        This prevents silent mismatches where a LineItem is filed under the
+        wrong key, causing resolve_field to read the wrong spec.
+        """
+        for key, item in LINE_ITEM_MAP.items():
+            assert item.buffett_name == key, (
+                f"Key {key!r} has buffett_name={item.buffett_name!r}"
+            )
+
+    def test_all_items_have_non_empty_notes(self) -> None:
+        """Every LineItem must document implementation caveats in notes.
+
+        Notes are referenced by financials.py and data_quality.py for
+        edge-case handling (sign conventions, derivation rules, zero-fill).
+        """
+        for name, item in LINE_ITEM_MAP.items():
+            assert len(item.notes.strip()) > 0, (
+                f"{name}.notes is empty — must describe implementation caveats"
+            )
+
+    def test_all_items_have_non_empty_ideal_field(self) -> None:
+        """ideal_field must be a non-empty string (the primary API field name)."""
+        for name, item in LINE_ITEM_MAP.items():
+            assert isinstance(item.ideal_field, str) and len(item.ideal_field) > 0, (
+                f"{name}.ideal_field is empty or not a string"
+            )
+
+    def test_substitutes_is_a_list(self) -> None:
+        """substitutes must be a list (possibly empty, never None)."""
+        for name, item in LINE_ITEM_MAP.items():
+            assert isinstance(item.substitutes, list), (
+                f"{name}.substitutes is {type(item.substitutes).__name__}, expected list"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Statement-type grouping (data lineage alignment with store.py DDL)
+# ---------------------------------------------------------------------------
+
+
+class TestStatementGrouping:
+    """Verify that LINE_ITEM_MAP statement assignments align with store.py DDL.
+
+    The DuckDB tables income_statement, balance_sheet, and cash_flow each
+    contain a specific subset of canonical columns. These tests verify the
+    grouping is consistent without importing store.py directly, so schema.py
+    remains free of circular dependencies.
+    """
+
+    # Expected grouping — must match store.py _TABLE_COLUMNS
+    EXPECTED_INCOME_STATEMENT = {
+        "net_income", "total_revenue", "gross_profit", "sga",
+        "operating_income", "interest_expense",
+        "eps_diluted", "shares_outstanding_diluted",
+    }
+    EXPECTED_BALANCE_SHEET = {
+        "long_term_debt", "shareholders_equity", "treasury_stock",
+    }
+    EXPECTED_CASH_FLOW = {
+        "depreciation_amortization", "capital_expenditures",
+        "working_capital_change",
+    }
+
+    def test_income_statement_fields(self) -> None:
+        """8 fields must be assigned to 'income_statement'."""
+        actual = {
+            name for name, item in LINE_ITEM_MAP.items()
+            if item.statement == "income_statement"
+        }
+        assert actual == self.EXPECTED_INCOME_STATEMENT
+
+    def test_balance_sheet_fields(self) -> None:
+        """3 fields must be assigned to 'balance_sheet'."""
+        actual = {
+            name for name, item in LINE_ITEM_MAP.items()
+            if item.statement == "balance_sheet"
+        }
+        assert actual == self.EXPECTED_BALANCE_SHEET
+
+    def test_cash_flow_fields(self) -> None:
+        """3 fields must be assigned to 'cash_flow'."""
+        actual = {
+            name for name, item in LINE_ITEM_MAP.items()
+            if item.statement == "cash_flow"
+        }
+        assert actual == self.EXPECTED_CASH_FLOW
+
+    def test_statement_distribution_sums_to_14(self) -> None:
+        """8 + 3 + 3 = 14 — every field assigned to exactly one statement."""
+        counts = {}
+        for item in LINE_ITEM_MAP.values():
+            counts[item.statement] = counts.get(item.statement, 0) + 1
+        assert sum(counts.values()) == 14
+        assert counts["income_statement"] == 8
+        assert counts["balance_sheet"] == 3
+        assert counts["cash_flow"] == 3
+
+
+# ---------------------------------------------------------------------------
+# resolve_field edge-case tests
+# ---------------------------------------------------------------------------
+
+
+class TestResolveFieldEdgeCases:
+    """Additional edge-case tests for resolve_field()."""
+
+    def test_none_value_in_raw_data_is_skipped(self) -> None:
+        """A field present in raw_data with value=None must be skipped.
+
+        resolve_field checks ``raw_data[candidate] is not None``, so an
+        explicit None should fall through to the next candidate or MISSING.
+        """
+        # Ideal field exists but is None — should skip to substitute
+        raw = {"netIncome": None, "netIncomeFromContinuingOperations": 3_000_000}
+        value, field_used, confidence = resolve_field(raw, "net_income")
+        assert value == 3_000_000
+        assert field_used == "netIncomeFromContinuingOperations"
+
+    def test_all_candidates_none_returns_missing(self) -> None:
+        """If every candidate key is present but None, result is MISSING."""
+        raw = {"netIncome": None, "netIncomeFromContinuingOperations": None,
+               "Net Income": None, "Net Income From Continuing Operations": None}
+        value, field_used, confidence = resolve_field(raw, "net_income")
+        assert value is None
+        assert field_used == "MISSING"
+        assert confidence == "DROP"
+
+    def test_ideal_preferred_over_substitute_when_both_present(self) -> None:
+        """When both ideal and substitute exist, ideal must win.
+
+        Priority order: ideal first, then substitutes in list order.
+        """
+        raw = {
+            "netIncome": 10_000_000,  # ideal — should be selected
+            "netIncomeFromContinuingOperations": 9_500_000,  # substitute
+        }
+        value, field_used, confidence = resolve_field(raw, "net_income")
+        assert value == 10_000_000
+        assert field_used == "netIncome"
+        assert confidence == "High"
+
+    def test_negative_net_income_resolves_correctly(self) -> None:
+        """A loss year (negative net income) must resolve with the value as-is.
+
+        Negative financial values are valid — they represent loss years, cash
+        outflows, or share reductions. resolve_field must not filter them.
+        """
+        raw = {"netIncome": -2_500_000}
+        value, field_used, confidence = resolve_field(raw, "net_income")
+        assert value == -2_500_000
+        assert field_used == "netIncome"
+        assert confidence == "High"
+
+    def test_zero_long_term_debt_resolves(self) -> None:
+        """A debt-free company with long_term_debt=0 must resolve normally.
+
+        Zero is a valid non-None value and must not be skipped. This is
+        important for F5 (debt payoff = 0 years → automatic pass) and
+        the interest_expense zero-fill rule.
+        """
+        raw = {"longTermDebt": 0}
+        value, field_used, confidence = resolve_field(raw, "long_term_debt")
+        assert value == 0
+        assert field_used == "longTermDebt"
+        assert confidence == "High"
+
+    def test_float_value_resolves(self) -> None:
+        """Float values (common for EPS) resolve correctly."""
+        raw = {"epsdiluted": 3.42}
+        value, field_used, confidence = resolve_field(raw, "eps_diluted")
+        assert value == 3.42
+        assert field_used == "epsdiluted"
+
+    def test_substitute_priority_order_respected(self) -> None:
+        """When multiple substitutes exist, the first in the list wins.
+
+        This tests the priority chain: if both the 2nd and 3rd substitutes
+        are present, the 2nd (higher priority) must be selected.
+        """
+        # For net_income: subs = [netIncomeFromContinuingOperations, Net Income, ...]
+        # Provide only 2nd and 3rd substitutes; 2nd should win.
+        raw = {
+            "Net Income": 4_000_000,
+            "Net Income From Continuing Operations": 3_800_000,
+        }
+        value, field_used, _ = resolve_field(raw, "net_income")
+        # "Net Income" is subs[1], "Net Income From Continuing Operations" is subs[2]
+        # subs[1] comes first in iteration → should be selected
+        assert field_used == "Net Income"
+        assert value == 4_000_000

@@ -7,6 +7,21 @@ Authoritative spec: docs/DATA_SOURCES.md §1 (current market data), §6 (yfinanc
 Rate limiting: reads ``data_sources.yfinance.rate_limit_per_sec`` from
 config/filter_config.yaml (default 2 req/sec = 120 req/min).
 
+Data lineage contract
+---------------------
+Upstream dependencies:
+  api_config.py          → RateLimiter (for yfinance rate limiting)
+  filter_config_loader   → get_config (for data_sources.yfinance.rate_limit_per_sec)
+  universe.py            → provides tickers list (with ``.TO`` suffix for TSX)
+
+Config dependency map (all from config/filter_config.yaml):
+  data_sources.yfinance.rate_limit_per_sec → _yf_limiter (rate limiting)
+
+Downstream consumers:
+  store.py               → writes market_data DataFrame to DuckDB market_data table
+  metrics_engine/        → reads current price, market cap, EV for F14, F15, F16
+  valuation_reports/     → reads current price for margin of safety and recommendations
+
 Key exports
 -----------
 fetch_market_data(tickers) -> pd.DataFrame
