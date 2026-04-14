@@ -1,4 +1,5 @@
-"""Tests for screener/hard_filters.py and screener/soft_filters.py.
+"""Tests for screener/hard_filters.py, screener/soft_filters.py,
+screener/exclusions.py, and screener/composite_ranker.py.
 
 Covers:
 - Hard filter ROE threshold (10 % fails, 20 % passes, 15 % boundary)
@@ -7,6 +8,9 @@ Covers:
 - NaN handling — NaN on any metric -> fail
 - Edge cases: EPS CAGR = 0 fails (strictly >), debt = inf fails, debt = 0 passes
 - Soft scoring: ranking correct for 5 mock stocks with known composite scores
+- Exclusions: bank vs non-bank, SIC codes, industry patterns, flags
+- Shortlist: 100 stocks → top 50, score_category boundaries
+- Screener summary: correct keys and values
 """
 
 from __future__ import annotations
@@ -16,6 +20,8 @@ import math
 import pandas as pd
 import pytest
 
+from screener.composite_ranker import generate_screener_summary, generate_shortlist
+from screener.exclusions import apply_exclusions
 from screener.hard_filters import apply_hard_filters
 from screener.soft_filters import apply_soft_scores
 
@@ -402,3 +408,434 @@ class TestSoftScoringRanking:
         })
         result = apply_soft_scores(survivors, composite)
         assert "rank" in result.columns
+
+
+# ===========================================================================
+# Exclusions — apply_exclusions
+# ===========================================================================
+
+
+def _universe_row(**overrides: object) -> dict:
+    """Return a single-ticker universe dict with safe defaults.
+
+    Override any key to inject sector/industry/SIC values.
+    """
+    base: dict = {
+        "ticker": "SAFE",
+        "exchange": "NYSE",
+        "company_name": "Safe Inc.",
+        "market_cap_usd": 1_000_000_000.0,
+        "sector": "Technology",
+        "industry": "Software — Application",
+        "country": "US",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestApplyExclusions:
+    """apply_exclusions must remove financial-sector tickers and keep others."""
+
+    def test_bank_excluded_by_industry_pattern(self):
+        """A 'Banks' industry in 'Financial Services' sector is excluded."""
+        df = _df(
+            _universe_row(ticker="BANK", sector="Financial Services",
+                          industry="Banks — Regional"),
+            _universe_row(ticker="TECH", sector="Technology",
+                          industry="Software — Application"),
+        )
+        filtered, log = apply_exclusions(df)
+        assert set(filtered["ticker"]) == {"TECH"}
+        assert "BANK" in log["ticker"].values
+
+    def test_insurance_excluded_by_industry_pattern(self):
+        """Insurance industry in Financial Services sector is excluded."""
+        df = _df(
+            _universe_row(ticker="INS", sector="Financial Services",
+                          industry="Insurance — Property & Casualty"),
+        )
+        filtered, _ = apply_exclusions(df)
+        assert len(filtered) == 0
+
+    def test_reit_excluded_by_industry_pattern(self):
+        """REIT industry in Financial Services sector is excluded."""
+        df = _df(
+            _universe_row(ticker="REIT_CO", sector="Financial Services",
+                          industry="REIT — Diversified"),
+        )
+        filtered, log = apply_exclusions(df)
+        assert len(filtered) == 0
+        assert "REIT_CO" in log["ticker"].values
+
+    def test_non_financial_sector_not_excluded_by_industry_keyword(self):
+        """Industry keyword match alone (without Financial Services sector)
+        does NOT exclude."""
+        df = _df(
+            _universe_row(ticker="SAFE_BANK", sector="Technology",
+                          industry="Data Banks & Storage"),
+        )
+        filtered, log = apply_exclusions(df)
+        assert "SAFE_BANK" in filtered["ticker"].values
+        assert len(log) == 0
+
+    def test_sic_code_exclusion(self):
+        """Ticker with SIC code 6020 (commercial bank) is excluded."""
+        df = _df(
+            _universe_row(ticker="SIC_BANK", sic_code=6020),
+            _universe_row(ticker="SIC_TECH", sic_code=3674),
+        )
+        filtered, log = apply_exclusions(df)
+        assert set(filtered["ticker"]) == {"SIC_TECH"}
+        assert "SIC_BANK" in log["ticker"].values
+
+    def test_sic_code_range_boundary(self):
+        """SIC code at range boundary (6029 = end of commercial banks)."""
+        df = _df(_universe_row(ticker="BOUNDARY", sic_code=6029))
+        filtered, _ = apply_exclusions(df)
+        assert len(filtered) == 0
+
+    def test_sic_code_outside_range_passes(self):
+        """SIC code just outside excluded range passes."""
+        df = _df(_universe_row(ticker="OUTSIDE", sic_code=6030))
+        filtered, _ = apply_exclusions(df)
+        assert "OUTSIDE" in filtered["ticker"].values
+
+    def test_flag_spac_excluded(self):
+        """Ticker flagged as SPAC is excluded."""
+        df = _df(_universe_row(ticker="SPAC_CO", is_SPAC=True))
+        filtered, log = apply_exclusions(df)
+        assert len(filtered) == 0
+        assert "SPAC_CO" in log["ticker"].values
+        assert "flag_excluded" in log.iloc[0]["reason"]
+
+    def test_flag_shell_company_excluded(self):
+        """Ticker flagged as shell company is excluded."""
+        df = _df(_universe_row(ticker="SHELL", is_shell_company=True))
+        filtered, _ = apply_exclusions(df)
+        assert len(filtered) == 0
+
+    def test_no_flag_columns_passes(self):
+        """Missing flag columns do not cause exclusion."""
+        df = _df(_universe_row(ticker="NORMAL"))
+        filtered, _ = apply_exclusions(df)
+        assert "NORMAL" in filtered["ticker"].values
+
+    def test_empty_input_returns_empty(self):
+        """Empty DataFrame returns two empty DataFrames."""
+        filtered, log = apply_exclusions(pd.DataFrame())
+        assert filtered.empty
+        assert log.empty
+
+    def test_exclusion_log_columns(self):
+        """Exclusion log must have ticker and reason columns."""
+        df = _df(
+            _universe_row(ticker="BANK", sector="Financial Services",
+                          industry="Banks — Regional"),
+        )
+        _, log = apply_exclusions(df)
+        assert set(log.columns) == {"ticker", "reason"}
+
+    def test_multiple_reasons_semicolon_separated(self):
+        """Ticker matching both SIC and industry gets combined reason."""
+        df = _df(
+            _universe_row(
+                ticker="DOUBLE",
+                sector="Financial Services",
+                industry="Insurance Brokers",
+                sic_code=6311,
+            ),
+        )
+        _, log = apply_exclusions(df)
+        reason = log.iloc[0]["reason"]
+        assert "sic_code_excluded" in reason
+        assert "industry_pattern_excluded" in reason
+        assert ";" in reason
+
+    def test_mixed_batch_correct_survivors(self):
+        """Mixed universe: only non-financial, non-flagged tickers survive."""
+        df = _df(
+            _universe_row(ticker="AAPL", sector="Technology",
+                          industry="Consumer Electronics"),
+            _universe_row(ticker="JPM", sector="Financial Services",
+                          industry="Banks — Diversified"),
+            _universe_row(ticker="KO", sector="Consumer Defensive",
+                          industry="Beverages — Non-Alcoholic"),
+            _universe_row(ticker="MET", sector="Financial Services",
+                          industry="Insurance — Life"),
+            _universe_row(ticker="MSFT", sector="Technology",
+                          industry="Software — Infrastructure"),
+        )
+        filtered, log = apply_exclusions(df)
+        assert set(filtered["ticker"]) == {"AAPL", "KO", "MSFT"}
+        assert set(log["ticker"]) == {"JPM", "MET"}
+
+
+# ===========================================================================
+# Shortlist — generate_shortlist
+# ===========================================================================
+
+
+def _ranked_df(n: int, base_score: float = 90.0) -> pd.DataFrame:
+    """Build a mock ranked DataFrame with *n* tickers.
+
+    Scores range from *base_score* down to *base_score - n + 1*
+    (one point apart). Rank column is 1-based.
+    """
+    tickers = [f"T{i:03d}" for i in range(1, n + 1)]
+    scores = [base_score - i + 1 for i in range(1, n + 1)]
+    return pd.DataFrame({
+        "ticker": tickers,
+        "composite_score": scores,
+        "rank": list(range(1, n + 1)),
+    })
+
+
+class TestGenerateShortlist:
+    """generate_shortlist selects top-N with rank, percentile, score_category."""
+
+    def test_100_stocks_top_50(self):
+        """100 ranked stocks → shortlist of 50 (config default)."""
+        df = _ranked_df(100)
+        shortlist = generate_shortlist(df, top_n=50)
+        assert len(shortlist) == 50
+        assert list(shortlist["ticker"])[0] == "T001"
+        assert list(shortlist["ticker"])[-1] == "T050"
+
+    def test_rank_preserved_from_input(self):
+        """Rank values should be preserved from the input ranked_df."""
+        df = _ranked_df(20)
+        shortlist = generate_shortlist(df, top_n=5)
+        assert list(shortlist["rank"]) == [1, 2, 3, 4, 5]
+
+    def test_percentile_rank_1_of_100(self):
+        """Rank 1 out of 100 → percentile = 100.0."""
+        df = _ranked_df(100)
+        shortlist = generate_shortlist(df, top_n=1)
+        assert shortlist.iloc[0]["percentile"] == 100.0
+
+    def test_percentile_rank_50_of_100(self):
+        """Rank 50 out of 100 → percentile = 51.0."""
+        df = _ranked_df(100)
+        shortlist = generate_shortlist(df, top_n=50)
+        row_50 = shortlist[shortlist["rank"] == 50].iloc[0]
+        assert row_50["percentile"] == 51.0
+
+    def test_score_category_strong_buy(self):
+        """Composite score >= 80 → 'Strong Buy'."""
+        df = pd.DataFrame({
+            "ticker": ["HIGH"],
+            "composite_score": [85.0],
+            "rank": [1],
+        })
+        shortlist = generate_shortlist(df, top_n=1)
+        assert shortlist.iloc[0]["score_category"] == "Strong Buy"
+
+    def test_score_category_buy(self):
+        """Composite score 70 <= s < 80 → 'Buy'."""
+        df = pd.DataFrame({
+            "ticker": ["MID"],
+            "composite_score": [75.0],
+            "rank": [1],
+        })
+        shortlist = generate_shortlist(df, top_n=1)
+        assert shortlist.iloc[0]["score_category"] == "Buy"
+
+    def test_score_category_hold(self):
+        """Composite score 60 <= s < 70 → 'Hold'."""
+        df = pd.DataFrame({
+            "ticker": ["OK"],
+            "composite_score": [65.0],
+            "rank": [1],
+        })
+        shortlist = generate_shortlist(df, top_n=1)
+        assert shortlist.iloc[0]["score_category"] == "Hold"
+
+    def test_score_category_weak(self):
+        """Composite score < 60 → 'Weak'."""
+        df = pd.DataFrame({
+            "ticker": ["LOW"],
+            "composite_score": [55.0],
+            "rank": [1],
+        })
+        shortlist = generate_shortlist(df, top_n=1)
+        assert shortlist.iloc[0]["score_category"] == "Weak"
+
+    def test_score_category_boundary_80(self):
+        """Exactly 80 → 'Strong Buy' (>= comparison)."""
+        df = pd.DataFrame({
+            "ticker": ["EDGE80"],
+            "composite_score": [80.0],
+            "rank": [1],
+        })
+        shortlist = generate_shortlist(df, top_n=1)
+        assert shortlist.iloc[0]["score_category"] == "Strong Buy"
+
+    def test_score_category_boundary_70(self):
+        """Exactly 70 → 'Buy' (>= comparison)."""
+        df = pd.DataFrame({
+            "ticker": ["EDGE70"],
+            "composite_score": [70.0],
+            "rank": [1],
+        })
+        shortlist = generate_shortlist(df, top_n=1)
+        assert shortlist.iloc[0]["score_category"] == "Buy"
+
+    def test_score_category_boundary_60(self):
+        """Exactly 60 → 'Hold' (>= comparison)."""
+        df = pd.DataFrame({
+            "ticker": ["EDGE60"],
+            "composite_score": [60.0],
+            "rank": [1],
+        })
+        shortlist = generate_shortlist(df, top_n=1)
+        assert shortlist.iloc[0]["score_category"] == "Hold"
+
+    def test_score_category_nan_is_weak(self):
+        """NaN composite_score → 'Weak'."""
+        df = pd.DataFrame({
+            "ticker": ["NAN"],
+            "composite_score": [float("nan")],
+            "rank": [1],
+        })
+        shortlist = generate_shortlist(df, top_n=1)
+        assert shortlist.iloc[0]["score_category"] == "Weak"
+
+    def test_top_n_larger_than_population(self):
+        """top_n > population → returns all rows."""
+        df = _ranked_df(5)
+        shortlist = generate_shortlist(df, top_n=100)
+        assert len(shortlist) == 5
+
+    def test_empty_ranked_returns_empty(self):
+        """Empty ranked_df → empty result."""
+        result = generate_shortlist(pd.DataFrame(), top_n=10)
+        assert result.empty
+
+    def test_metadata_columns_present(self):
+        """Output must have rank, percentile, score_category columns."""
+        df = _ranked_df(3)
+        shortlist = generate_shortlist(df, top_n=2)
+        assert "rank" in shortlist.columns
+        assert "percentile" in shortlist.columns
+        assert "score_category" in shortlist.columns
+
+    def test_default_top_n_from_config(self):
+        """When top_n=None, reads output.shortlist_size from config (50)."""
+        df = _ranked_df(100)
+        shortlist = generate_shortlist(df)  # top_n=None
+        assert len(shortlist) == 50
+
+
+# ===========================================================================
+# Screener summary — generate_screener_summary
+# ===========================================================================
+
+
+class TestGenerateScreenerSummary:
+    """generate_screener_summary builds a stats dict from pipeline outputs."""
+
+    def test_summary_has_required_keys(self):
+        """Summary dict must contain all expected keys."""
+        full_ranked = _ranked_df(10)
+        shortlist = full_ranked.head(5).copy()
+        filter_log = pd.DataFrame({
+            "ticker": ["A", "A", "B", "B"],
+            "filter_name": ["f1", "f2", "f1", "f2"],
+            "pass_fail": [True, True, True, False],
+        })
+        summary = generate_screener_summary(full_ranked, shortlist, filter_log)
+        required = {
+            "after_exclusions", "after_tier1", "shortlisted",
+            "top_score", "median_score", "bottom_score",
+            "sector_distribution", "exchange_distribution",
+        }
+        assert required.issubset(set(summary.keys()))
+
+    def test_after_exclusions_from_filter_log(self):
+        """after_exclusions = unique tickers in filter_log."""
+        full_ranked = _ranked_df(5)
+        shortlist = full_ranked.head(3).copy()
+        filter_log = pd.DataFrame({
+            "ticker": ["A", "A", "B", "B", "C", "C", "D", "D", "E", "E"],
+            "filter_name": ["f1"] * 5 + ["f2"] * 5,
+            "pass_fail": [True] * 10,
+        })
+        summary = generate_screener_summary(full_ranked, shortlist, filter_log)
+        assert summary["after_exclusions"] == 5
+
+    def test_after_tier1_count(self):
+        """after_tier1 = number of rows in full_ranked_df."""
+        full_ranked = _ranked_df(8)
+        summary = generate_screener_summary(
+            full_ranked, full_ranked.head(3), pd.DataFrame(),
+        )
+        assert summary["after_tier1"] == 8
+
+    def test_shortlisted_count(self):
+        """shortlisted = number of rows in shortlist_df."""
+        full_ranked = _ranked_df(20)
+        shortlist = full_ranked.head(10).copy()
+        summary = generate_screener_summary(
+            full_ranked, shortlist, pd.DataFrame(),
+        )
+        assert summary["shortlisted"] == 10
+
+    def test_score_statistics(self):
+        """top/median/bottom score correctly computed."""
+        full_ranked = pd.DataFrame({
+            "ticker": ["A", "B", "C"],
+            "composite_score": [90.0, 70.0, 50.0],
+        })
+        summary = generate_screener_summary(
+            full_ranked, full_ranked, pd.DataFrame(),
+        )
+        assert summary["top_score"] == 90.0
+        assert summary["median_score"] == 70.0
+        assert summary["bottom_score"] == 50.0
+
+    def test_sector_distribution(self):
+        """sector_distribution counts sectors in shortlist."""
+        shortlist = pd.DataFrame({
+            "ticker": ["A", "B", "C"],
+            "composite_score": [90.0, 80.0, 70.0],
+            "sector": ["Tech", "Tech", "Health"],
+        })
+        summary = generate_screener_summary(
+            shortlist, shortlist, pd.DataFrame(),
+        )
+        assert summary["sector_distribution"]["Tech"] == 2
+        assert summary["sector_distribution"]["Health"] == 1
+
+    def test_exchange_distribution(self):
+        """exchange_distribution counts exchanges in shortlist."""
+        shortlist = pd.DataFrame({
+            "ticker": ["A", "B", "C"],
+            "composite_score": [90.0, 80.0, 70.0],
+            "exchange": ["NYSE", "NASDAQ", "NYSE"],
+        })
+        summary = generate_screener_summary(
+            shortlist, shortlist, pd.DataFrame(),
+        )
+        assert summary["exchange_distribution"]["NYSE"] == 2
+        assert summary["exchange_distribution"]["NASDAQ"] == 1
+
+    def test_empty_inputs(self):
+        """All empty inputs → zero counts and None scores."""
+        summary = generate_screener_summary(
+            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
+        )
+        assert summary["after_tier1"] == 0
+        assert summary["shortlisted"] == 0
+        assert summary["top_score"] is None
+
+    def test_nan_scores_excluded_from_stats(self):
+        """NaN scores should not affect top/median/bottom."""
+        full_ranked = pd.DataFrame({
+            "ticker": ["A", "B", "C"],
+            "composite_score": [80.0, float("nan"), 60.0],
+        })
+        summary = generate_screener_summary(
+            full_ranked, full_ranked, pd.DataFrame(),
+        )
+        assert summary["top_score"] == 80.0
+        assert summary["bottom_score"] == 60.0

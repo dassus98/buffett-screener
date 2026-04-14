@@ -72,6 +72,17 @@ exclusions:
                      # Leave empty to rely solely on SIC codes.
                      # Example: ["Financials", "Utilities", "Real Estate"]
 
+  industry_keywords:  # Fallback: exclude if industry contains keyword AND sector matches financial_sector_label
+    - Banks
+    - Insurance
+    - REIT
+    - Real Estate Investment
+    - Mortgage Finance
+    - Thrift
+    - Savings
+
+  financial_sector_label: Financial Services  # Sector that must match for industry keyword exclusion
+
   flags:             # Company-type flags sourced from FMP or yfinance profile
     - SPAC
     - shell_company
@@ -234,6 +245,7 @@ valuation:
 # Recommendations
 # ---------------------------------------------------------------------------
 recommendations:
+  strong_buy_min_score: 80        # Composite score ≥ 80 → "Strong Buy" category
   buy_min_mos: 0.25               # MoS ≥ 25% required for BUY
   buy_min_score: 70               # Composite score ≥ 70 required for BUY
   hold_min_mos: 0.10              # MoS ≥ 10% required for HOLD
