@@ -281,7 +281,31 @@ def _run_stage_3(
     filtered_df, exclusion_log = apply_exclusions(universe_df)
 
     # Step 3b: Read metrics summary and apply hard filters
-    metrics_summary_df = read_table("buffett_metrics_summary")
+    #   buffett_metrics_summary is a Module 2 table created via
+    #   _write_table_full_replace, not in Module 1's _TABLE_DDL.
+    #   Read directly via get_connection().
+    from data_acquisition.store import get_connection as _get_conn
+
+    conn = _get_conn()
+    try:
+        metrics_summary_df = conn.execute(
+            "SELECT * FROM buffett_metrics_summary",
+        ).fetchdf()
+    except Exception:
+        logger.warning("buffett_metrics_summary table not found.")
+        metrics_summary_df = pd.DataFrame()
+
+    # Enrich with years_available from data_quality_log
+    # (hard filters need this for the data_sufficiency check)
+    if not metrics_summary_df.empty:
+        quality_df = read_table("data_quality_log")
+        if not quality_df.empty and "years_available" in quality_df.columns:
+            metrics_summary_df = metrics_summary_df.merge(
+                quality_df[["ticker", "years_available"]],
+                on="ticker",
+                how="left",
+            )
+
     # Keep only tickers that survived exclusions
     if not filtered_df.empty and not metrics_summary_df.empty:
         surviving_tickers = set(filtered_df["ticker"].tolist())

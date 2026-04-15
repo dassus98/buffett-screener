@@ -710,7 +710,7 @@ def build_report_context(ticker: str) -> dict[str, Any]:
     # --- Step 18: MoS-derived buy-below prices ---
     buy_min_mos = float(get_threshold("recommendations.buy_min_mos"))
     iv_w = valuation.get("weighted_iv", float("nan"))
-    mos_conservative = 0.50
+    mos_conservative = float(get_threshold("valuation.mos_conservative"))
     mos_moderate = buy_min_mos
 
     buy_below_conservative = iv_w * (1 - mos_conservative) if not math.isnan(iv_w) else float("nan")
