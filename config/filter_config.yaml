@@ -328,6 +328,11 @@ reports:
   moat_roe_threshold: 0.15            # ≥ 15% ROE → "consistent with durable advantage"
   moat_margin_stability_threshold: 0.05  # Gross margin stdev < 5% → "stable"
 
+  # Earnings yield verdict thresholds (interpretive labels for F16 spread)
+  yield_verdict:
+    attractive_min_spread: 0.04   # Spread > 4% → "Attractive"
+    moderate_min_spread: 0.02     # Spread 2–4% → "Moderate"; below → "Unattractive"
+
 
 # ---------------------------------------------------------------------------
 # Logging
