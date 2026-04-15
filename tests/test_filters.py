@@ -745,7 +745,7 @@ class TestGenerateScreenerSummary:
         })
         summary = generate_screener_summary(full_ranked, shortlist, filter_log)
         required = {
-            "after_exclusions", "after_tier1", "shortlisted",
+            "total_universe", "after_exclusions", "after_tier1", "shortlisted",
             "top_score", "median_score", "bottom_score",
             "sector_distribution", "exchange_distribution",
         }

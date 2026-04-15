@@ -1,33 +1,37 @@
-"""Integration tests: Module 3 full screening pipeline.
+"""Integration tests: Module 3 screening pipeline.
 
-Exercises the complete screening chain with 20 mock tickers:
+Exercises the full screening pipeline end-to-end with 20 synthetic tickers
+in five quality tiers:
 
-    apply_exclusions → apply_hard_filters → apply_soft_scores
-        → generate_shortlist → generate_screener_summary
+* **5 high-quality (HQ_01–HQ_05)** — strong Buffett characteristics: ROE > 20 %,
+  EPS CAGR > 10 %, low debt, high margins.  Expected composite scores 80–97.
+* **5 medium-quality (MQ_01–MQ_05)** — pass hard filters but mediocre soft
+  scores: moderate ROE, low-ish growth, middling debt and margins.
+  Expected composite scores 40–55.
+* **5 hard-filter failures (FAIL_ROE, FAIL_EPS, FAIL_DEBT, FAIL_EARN,
+  FAIL_DATA)** — each fails exactly one Tier 1 hard filter.
+* **3 financial-sector (FIN_BANK, FIN_INS, FIN_SIC)** — excluded by SIC code
+  and/or industry keyword before Tier 1.
+* **2 low-score (LOW_01, LOW_02)** — pass hard filters but score poorly on
+  all soft criteria (~10–20), placing them outside the top-10 shortlist.
 
-Ticker categories
------------------
-* **5 high-quality** — ROE > 20 %, EPS CAGR > 7 %, low debt, high margins.
-  Composite scores 78–92.
-* **5 medium-quality** — pass all hard filters but mediocre soft scores.
-  Composite scores 52–65.
-* **5 Tier 1 failures** — each fails a different hard filter
-  (low ROE, negative EPS growth, high debt, few profitable years,
-  insufficient history).
-* **3 financial-sector** — excluded before hard filters via industry-keyword
-  matching (Banks, Insurance, REIT).
-* **2 below-shortlist** — pass hard filters but composite scores (42–45) are
-  the lowest among survivors, ensuring they fall outside the top-10 shortlist.
+Pipeline under test
+-------------------
+``apply_exclusions → apply_hard_filters → apply_soft_scores → generate_shortlist``
+
+Composite scores are computed via the real ``compute_all_composite_scores``
+engine (not pre-baked), so this test also exercises the full soft-scoring
+pipeline end-to-end.
 
 What is verified
 ----------------
-1. Financial-sector tickers excluded before Tier 1.
-2. Tier 1 failures removed for the correct reason.
-3. Shortlist size, ordering, and score dominance over non-shortlisted
-   survivors.
-4. Filter log completeness (every ticker × every filter).
-5. Summary statistics match pipeline counts.
-6. Idempotency — running the pipeline twice yields identical results.
+1. Financial-sector exclusion removes exactly 3 tickers before Tier 1.
+2. Hard filters remove exactly 5 tickers (one per failure reason).
+3. Shortlist contains ≤ 10 stocks, ordered by composite_score descending.
+4. All shortlist stocks outscore all non-shortlist survivors.
+5. filter_log_df has entries for every ticker × every filter.
+6. generate_screener_summary produces correct pipeline counts.
+7. Idempotency: running the pipeline twice yields identical results.
 """
 
 from __future__ import annotations
@@ -35,294 +39,279 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from metrics_engine.composite_score import compute_all_composite_scores
 from screener.composite_ranker import generate_screener_summary, generate_shortlist
 from screener.exclusions import apply_exclusions
 from screener.hard_filters import apply_hard_filters
 from screener.soft_filters import apply_soft_scores
 
-
 # ---------------------------------------------------------------------------
-# Test data — 20 tickers with known quality profiles
+# Ticker group constants
 # ---------------------------------------------------------------------------
 
-_HIGH_QUALITY: list[dict] = [
-    {
-        "ticker": "HQ1", "exchange": "NYSE",
-        "sector": "Technology", "industry": "Software — Application",
-        "profitable_years": 10, "avg_roe": 0.25, "eps_cagr": 0.12,
-        "debt_payoff_years": 1.5, "years_available": 10,
-        "composite_score": 92.0, "score_roe": 95.0,
-    },
-    {
-        "ticker": "HQ2", "exchange": "NYSE",
-        "sector": "Healthcare", "industry": "Drug Manufacturers",
-        "profitable_years": 10, "avg_roe": 0.22, "eps_cagr": 0.10,
-        "debt_payoff_years": 2.0, "years_available": 10,
-        "composite_score": 88.0, "score_roe": 85.0,
-    },
-    {
-        "ticker": "HQ3", "exchange": "NASDAQ",
-        "sector": "Technology", "industry": "Semiconductors",
-        "profitable_years": 9, "avg_roe": 0.20, "eps_cagr": 0.08,
-        "debt_payoff_years": 1.0, "years_available": 10,
-        "composite_score": 85.0, "score_roe": 80.0,
-    },
-    {
-        "ticker": "HQ4", "exchange": "NASDAQ",
-        "sector": "Consumer Defensive", "industry": "Beverages",
-        "profitable_years": 10, "avg_roe": 0.18, "eps_cagr": 0.15,
-        "debt_payoff_years": 3.0, "years_available": 10,
-        "composite_score": 82.0, "score_roe": 70.0,
-    },
-    {
-        "ticker": "HQ5", "exchange": "TSX",
-        "sector": "Industrials", "industry": "Aerospace & Defense",
-        "profitable_years": 10, "avg_roe": 0.21, "eps_cagr": 0.07,
-        "debt_payoff_years": 2.5, "years_available": 10,
-        "composite_score": 78.0, "score_roe": 82.0,
-    },
-]
+TICKERS_HQ = ["HQ_01", "HQ_02", "HQ_03", "HQ_04", "HQ_05"]
+TICKERS_MQ = ["MQ_01", "MQ_02", "MQ_03", "MQ_04", "MQ_05"]
+TICKERS_FAIL = ["FAIL_ROE", "FAIL_EPS", "FAIL_DEBT", "FAIL_EARN", "FAIL_DATA"]
+TICKERS_FIN = ["FIN_BANK", "FIN_INS", "FIN_SIC"]
+TICKERS_LOW = ["LOW_01", "LOW_02"]
 
-_MEDIUM_QUALITY: list[dict] = [
-    {
-        "ticker": "MQ1", "exchange": "NYSE",
-        "sector": "Consumer Cyclical", "industry": "Apparel",
-        "profitable_years": 8, "avg_roe": 0.16, "eps_cagr": 0.03,
-        "debt_payoff_years": 4.0, "years_available": 9,
-        "composite_score": 65.0, "score_roe": 55.0,
-    },
-    {
-        "ticker": "MQ2", "exchange": "NASDAQ",
-        "sector": "Technology", "industry": "IT Services",
-        "profitable_years": 9, "avg_roe": 0.17, "eps_cagr": 0.02,
-        "debt_payoff_years": 3.5, "years_available": 10,
-        "composite_score": 62.0, "score_roe": 58.0,
-    },
-    {
-        "ticker": "MQ3", "exchange": "NYSE",
-        "sector": "Healthcare", "industry": "Medical Devices",
-        "profitable_years": 8, "avg_roe": 0.15, "eps_cagr": 0.01,
-        "debt_payoff_years": 4.5, "years_available": 8,
-        "composite_score": 58.0, "score_roe": 50.0,
-    },
-    {
-        "ticker": "MQ4", "exchange": "TSX",
-        "sector": "Industrials", "industry": "Building Products",
-        "profitable_years": 8, "avg_roe": 0.16, "eps_cagr": 0.04,
-        "debt_payoff_years": 5.0, "years_available": 9,
-        "composite_score": 55.0, "score_roe": 55.0,
-    },
-    {
-        "ticker": "MQ5", "exchange": "NYSE",
-        "sector": "Consumer Defensive", "industry": "Household Products",
-        "profitable_years": 9, "avg_roe": 0.15, "eps_cagr": 0.02,
-        "debt_payoff_years": 3.0, "years_available": 10,
-        "composite_score": 52.0, "score_roe": 50.0,
-    },
-]
+ALL_TICKERS = TICKERS_HQ + TICKERS_MQ + TICKERS_FAIL + TICKERS_FIN + TICKERS_LOW
+TICKERS_AFTER_EXCLUSIONS = TICKERS_HQ + TICKERS_MQ + TICKERS_FAIL + TICKERS_LOW
+TICKERS_AFTER_HARD = TICKERS_HQ + TICKERS_MQ + TICKERS_LOW
 
-_FAIL_TIER1: list[dict] = [
-    {   # Fails roe_floor (0.10 < 0.15)
-        "ticker": "F1_ROE", "exchange": "NYSE",
-        "sector": "Technology", "industry": "Software",
-        "profitable_years": 10, "avg_roe": 0.10, "eps_cagr": 0.05,
-        "debt_payoff_years": 2.0, "years_available": 10,
-        "composite_score": 40.0, "score_roe": 30.0,
-    },
-    {   # Fails eps_growth (-0.02 not > 0.0)
-        "ticker": "F2_EPS", "exchange": "NASDAQ",
-        "sector": "Healthcare", "industry": "Diagnostics",
-        "profitable_years": 10, "avg_roe": 0.20, "eps_cagr": -0.02,
-        "debt_payoff_years": 2.0, "years_available": 10,
-        "composite_score": 35.0, "score_roe": 80.0,
-    },
-    {   # Fails debt_sustainability (8.0 > 5.0)
-        "ticker": "F3_DEBT", "exchange": "NYSE",
-        "sector": "Industrials", "industry": "Construction",
-        "profitable_years": 10, "avg_roe": 0.20, "eps_cagr": 0.05,
-        "debt_payoff_years": 8.0, "years_available": 10,
-        "composite_score": 30.0, "score_roe": 80.0,
-    },
-    {   # Fails earnings_consistency (5 < 8)
-        "ticker": "F4_EARN", "exchange": "TSX",
-        "sector": "Energy", "industry": "Oil & Gas",
-        "profitable_years": 5, "avg_roe": 0.20, "eps_cagr": 0.05,
-        "debt_payoff_years": 2.0, "years_available": 10,
-        "composite_score": 25.0, "score_roe": 80.0,
-    },
-    {   # Fails data_sufficiency (5 < 8)
-        "ticker": "F5_DATA", "exchange": "NASDAQ",
-        "sector": "Technology", "industry": "Cloud Computing",
-        "profitable_years": 10, "avg_roe": 0.20, "eps_cagr": 0.05,
-        "debt_payoff_years": 2.0, "years_available": 5,
-        "composite_score": 20.0, "score_roe": 80.0,
-    },
-]
-
-_FINANCIALS: list[dict] = [
-    {
-        "ticker": "FIN1", "exchange": "NYSE",
-        "sector": "Financial Services", "industry": "Banks — Diversified",
-        "profitable_years": 10, "avg_roe": 0.15, "eps_cagr": 0.05,
-        "debt_payoff_years": 2.0, "years_available": 10,
-        "composite_score": 70.0, "score_roe": 50.0,
-    },
-    {
-        "ticker": "FIN2", "exchange": "NYSE",
-        "sector": "Financial Services",
-        "industry": "Insurance — Property & Casualty",
-        "profitable_years": 10, "avg_roe": 0.18, "eps_cagr": 0.06,
-        "debt_payoff_years": 3.0, "years_available": 10,
-        "composite_score": 68.0, "score_roe": 65.0,
-    },
-    {
-        "ticker": "FIN3", "exchange": "NASDAQ",
-        "sector": "Financial Services", "industry": "REIT — Diversified",
-        "profitable_years": 10, "avg_roe": 0.16, "eps_cagr": 0.04,
-        "debt_payoff_years": 2.5, "years_available": 10,
-        "composite_score": 66.0, "score_roe": 55.0,
-    },
-]
-
-_BELOW_THRESHOLD: list[dict] = [
-    {
-        "ticker": "BT1", "exchange": "NYSE",
-        "sector": "Consumer Cyclical", "industry": "Restaurants",
-        "profitable_years": 8, "avg_roe": 0.155, "eps_cagr": 0.005,
-        "debt_payoff_years": 4.8, "years_available": 8,
-        "composite_score": 45.0, "score_roe": 52.0,
-    },
-    {
-        "ticker": "BT2", "exchange": "TSX",
-        "sector": "Industrials", "industry": "Waste Management",
-        "profitable_years": 8, "avg_roe": 0.151, "eps_cagr": 0.003,
-        "debt_payoff_years": 4.9, "years_available": 8,
-        "composite_score": 42.0, "score_roe": 48.0,
-    },
-]
-
-_ALL_TICKERS = (
-    _HIGH_QUALITY + _MEDIUM_QUALITY + _FAIL_TIER1
-    + _FINANCIALS + _BELOW_THRESHOLD
-)
-
-# Expected ticker sets at each pipeline stage
-_EXCLUDED_TICKERS = {"FIN1", "FIN2", "FIN3"}
-_TIER1_FAIL_TICKERS = {"F1_ROE", "F2_EPS", "F3_DEBT", "F4_EARN", "F5_DATA"}
-_SURVIVOR_TICKERS = {
-    "HQ1", "HQ2", "HQ3", "HQ4", "HQ5",
-    "MQ1", "MQ2", "MQ3", "MQ4", "MQ5",
-    "BT1", "BT2",
-}
-_SHORTLIST_TICKERS = {
-    "HQ1", "HQ2", "HQ3", "HQ4", "HQ5",
-    "MQ1", "MQ2", "MQ3", "MQ4", "MQ5",
-}
-_NON_SHORTLIST_SURVIVORS = {"BT1", "BT2"}
-
-_EXPECTED_FILTERS = {
+N_HARD_FILTERS = 5  # earnings_consistency, roe_floor, eps_growth, debt, data
+EXPECTED_FILTERS = {
     "earnings_consistency", "roe_floor", "eps_growth",
     "debt_sustainability", "data_sufficiency",
 }
 
 
 # ---------------------------------------------------------------------------
-# DataFrame builders
+# Universe DataFrame builder (input to apply_exclusions)
 # ---------------------------------------------------------------------------
 
 
 def _build_universe_df() -> pd.DataFrame:
-    """Construct the 20-ticker universe DataFrame."""
-    rows = []
-    for t in _ALL_TICKERS:
+    """Build a 20-ticker universe DataFrame with sector/industry/SIC/flags."""
+    rows: list[dict] = []
+
+    # --- High-quality: Technology sector, clean non-financial SIC ---
+    for t in TICKERS_HQ:
         rows.append({
-            "ticker": t["ticker"],
-            "exchange": t["exchange"],
-            "company_name": f"{t['ticker']} Inc.",
-            "market_cap_usd": 1_000_000_000.0,
-            "sector": t["sector"],
-            "industry": t["industry"],
-            "country": "US",
+            "ticker": t, "sector": "Technology", "industry": "Software",
+            "sic_code": 7372, "is_SPAC": False, "is_shell_company": False,
         })
-    return pd.DataFrame(rows)
 
-
-def _build_metrics_summary(tickers: set[str]) -> pd.DataFrame:
-    """Build a metrics-summary DataFrame for a subset of tickers.
-
-    Includes both hard-filter metric columns and universe metadata
-    (sector, exchange) so they propagate to the shortlist.
-    """
-    lookup = {t["ticker"]: t for t in _ALL_TICKERS}
-    rows = []
-    for ticker in sorted(tickers):
-        d = lookup[ticker]
+    # --- Medium-quality: Consumer Defensive sector ---
+    for t in TICKERS_MQ:
         rows.append({
-            "ticker": d["ticker"],
-            "profitable_years": d["profitable_years"],
-            "avg_roe": d["avg_roe"],
-            "eps_cagr": d["eps_cagr"],
-            "debt_payoff_years": d["debt_payoff_years"],
-            "years_available": d["years_available"],
-            "sector": d["sector"],
-            "exchange": d["exchange"],
+            "ticker": t, "sector": "Consumer Defensive",
+            "industry": "Beverages—Non-Alcoholic",
+            "sic_code": 2080, "is_SPAC": False, "is_shell_company": False,
         })
-    return pd.DataFrame(rows)
 
-
-def _build_composite_scores(tickers: set[str]) -> pd.DataFrame:
-    """Build composite-scores DataFrame for a subset of tickers."""
-    lookup = {t["ticker"]: t for t in _ALL_TICKERS}
-    rows = []
-    for ticker in sorted(tickers):
-        d = lookup[ticker]
+    # --- Hard-filter failures: Industrials sector (not excluded) ---
+    for t in TICKERS_FAIL:
         rows.append({
-            "ticker": d["ticker"],
-            "composite_score": d["composite_score"],
-            "score_roe": d["score_roe"],
+            "ticker": t, "sector": "Industrials",
+            "industry": "Aerospace & Defense",
+            "sic_code": 3720, "is_SPAC": False, "is_shell_company": False,
         })
+
+    # --- Financial-sector tickers (should be excluded) ---
+    #     FIN_BANK: SIC 6020 (excluded range) + keyword "Banks" match
+    #     FIN_INS:  SIC 6311 (excluded range) + keyword "Insurance" match
+    #     FIN_SIC:  SIC 6726 (excluded range), no keyword match
+    rows.append({
+        "ticker": "FIN_BANK", "sector": "Financial Services",
+        "industry": "Banks—Diversified",
+        "sic_code": 6020, "is_SPAC": False, "is_shell_company": False,
+    })
+    rows.append({
+        "ticker": "FIN_INS", "sector": "Financial Services",
+        "industry": "Insurance—Diversified",
+        "sic_code": 6311, "is_SPAC": False, "is_shell_company": False,
+    })
+    rows.append({
+        "ticker": "FIN_SIC", "sector": "Financial Services",
+        "industry": "Capital Markets",
+        "sic_code": 6726, "is_SPAC": False, "is_shell_company": False,
+    })
+
+    # --- Low-score: Healthcare sector (pass hard filters, poor soft scores) ---
+    for t in TICKERS_LOW:
+        rows.append({
+            "ticker": t, "sector": "Healthcare",
+            "industry": "Pharmaceuticals",
+            "sic_code": 2834, "is_SPAC": False, "is_shell_company": False,
+        })
+
     return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
-# Pipeline runner
+# Metrics summary DataFrame builder (input to apply_hard_filters)
+#
+# Contains both hard-filter columns and sector/exchange metadata so they
+# propagate through survivors_df → ranked_df → shortlist_df for downstream
+# distribution reporting.
+# ---------------------------------------------------------------------------
+
+_PASS_DEFAULTS: dict[str, object] = {
+    "profitable_years": 10,
+    "avg_roe": 0.20,
+    "eps_cagr": 0.05,
+    "debt_payoff_years": 2.0,
+    "years_available": 10,
+}
+
+# Each FAIL ticker overrides exactly ONE metric so it fails that filter.
+_FAIL_OVERRIDES: dict[str, dict[str, object]] = {
+    "FAIL_ROE":  {"avg_roe": 0.10},            # below min_avg_roe (0.15)
+    "FAIL_EPS":  {"eps_cagr": -0.02},           # not strictly > min_eps_cagr (0.0)
+    "FAIL_DEBT": {"debt_payoff_years": 8.0},    # above max_debt_payoff_years (5.0)
+    "FAIL_EARN": {"profitable_years": 5},        # below min_profitable_years (8)
+    "FAIL_DATA": {"years_available": 3},         # below min_history_years (8)
+}
+
+_SECTOR_MAP: dict[str, tuple[str, str]] = {
+    "HQ":   ("Technology",         "NASDAQ"),
+    "MQ":   ("Consumer Defensive", "NYSE"),
+    "FAIL": ("Industrials",        "NYSE"),
+    "LOW":  ("Healthcare",         "TSX"),
+}
+
+
+def _build_metrics_summary_df(tickers: list[str]) -> pd.DataFrame:
+    """Build metrics_summary_df for *tickers* (post-exclusion).
+
+    Each row carries the five hard-filter columns plus ``sector`` and
+    ``exchange`` so downstream shortlist/summary can compute distributions.
+    """
+    rows: list[dict] = []
+    for t in tickers:
+        row: dict = {"ticker": t, **_PASS_DEFAULTS}
+        if t in _FAIL_OVERRIDES:
+            row.update(_FAIL_OVERRIDES[t])
+        prefix = t.split("_")[0]
+        sector, exchange = _SECTOR_MAP.get(prefix, ("Unknown", "OTC"))
+        row["sector"] = sector
+        row["exchange"] = exchange
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Composite-score metric builders (12 keys consumed by the 10 criterion
+# scorers in composite_score.py).  Each builder produces slightly
+# different values per index so all 12 survivors have distinct scores.
+# ---------------------------------------------------------------------------
+
+
+def _hq_metrics(idx: int) -> dict[str, float]:
+    """High-quality metrics — composite score expected ~80-97.
+
+    Slight per-ticker variation (via *idx* 0-4) so each HQ ticker gets a
+    distinct composite score, enabling deterministic rank ordering.
+    """
+    return {
+        "avg_roe":              0.25 - idx * 0.005,   # 0.250 → 0.230
+        "roe_stdev":            0.02,                  # below 0.05 penalty threshold
+        "avg_gross_margin":     0.60 - idx * 0.01,     # 0.60 → 0.56
+        "avg_sga_ratio":        0.30 + idx * 0.01,     # 0.30 → 0.34
+        "eps_cagr":             0.20 - idx * 0.01,     # 0.20 → 0.16
+        "decline_years":        0,
+        "avg_de_10yr":          0.20 + idx * 0.02,     # 0.20 → 0.28
+        "owner_earnings_cagr":  0.18 - idx * 0.01,     # 0.18 → 0.14
+        "avg_capex_to_ni":      0.25 + idx * 0.02,     # 0.25 → 0.33
+        "buyback_pct":          0.15 - idx * 0.01,     # 0.15 → 0.11
+        "return_on_retained":   0.15 - idx * 0.005,    # 0.150 → 0.130
+        "avg_interest_pct_10yr": 0.08,                 # below excellent (0.10) → 100
+    }
+
+
+def _mq_metrics(idx: int) -> dict[str, float]:
+    """Medium-quality metrics — composite score expected ~40-55.
+
+    Moderate ROE, low growth, middling debt and efficiency ratios.
+    """
+    return {
+        "avg_roe":              0.17 + idx * 0.002,    # 0.170 → 0.178
+        "roe_stdev":            0.03,                  # below penalty threshold
+        "avg_gross_margin":     0.40 - idx * 0.01,     # 0.40 → 0.36
+        "avg_sga_ratio":        0.55 + idx * 0.02,     # 0.55 → 0.63
+        "eps_cagr":             0.08 - idx * 0.005,    # 0.08 → 0.06
+        "decline_years":        1,                     # 0.9× consistency multiplier
+        "avg_de_10yr":          0.50 + idx * 0.02,     # 0.50 → 0.58
+        "owner_earnings_cagr":  0.06 - idx * 0.005,    # 0.06 → 0.04
+        "avg_capex_to_ni":      0.50 + idx * 0.02,     # 0.50 → 0.58
+        "buyback_pct":          0.02 - idx * 0.005,    # 0.020 → 0.000
+        "return_on_retained":   0.12 - idx * 0.005,    # 0.120 → 0.100
+        "avg_interest_pct_10yr": 0.15 + idx * 0.005,   # 0.15 → 0.17
+    }
+
+
+def _low_metrics(idx: int) -> dict[str, float]:
+    """Low-score metrics — composite score expected ~10-20.
+
+    Barely passes hard filters but scores poorly on every soft criterion.
+    ROE stdev above penalty threshold, 3 decline years (worst multiplier).
+    """
+    return {
+        "avg_roe":              0.16,
+        "roe_stdev":            0.06,                  # above 0.05 penalty threshold
+        "avg_gross_margin":     0.22 - idx * 0.01,     # 0.22 → 0.21
+        "avg_sga_ratio":        0.72 + idx * 0.02,     # 0.72 → 0.74
+        "eps_cagr":             0.01,
+        "decline_years":        3,                     # 0.6× consistency multiplier
+        "avg_de_10yr":          0.75 + idx * 0.02,     # 0.75 → 0.77
+        "owner_earnings_cagr":  0.01,
+        "avg_capex_to_ni":      0.70 + idx * 0.02,     # 0.70 → 0.72
+        "buyback_pct":          -0.03,                 # slight dilution
+        "return_on_retained":   0.03 - idx * 0.005,    # 0.030 → 0.025
+        "avg_interest_pct_10yr": 0.28 + idx * 0.01,    # 0.28 → 0.29
+    }
+
+
+def _build_all_metrics(tickers: list[str]) -> dict[str, dict[str, float]]:
+    """Build ``{ticker: metrics_dict}`` for ``compute_all_composite_scores``."""
+    result: dict[str, dict[str, float]] = {}
+    for t in tickers:
+        prefix, num = t.split("_", 1)
+        idx = int(num) - 1
+        if prefix == "HQ":
+            result[t] = _hq_metrics(idx)
+        elif prefix == "MQ":
+            result[t] = _mq_metrics(idx)
+        elif prefix == "LOW":
+            result[t] = _low_metrics(idx)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Full pipeline runner
 # ---------------------------------------------------------------------------
 
 
 def _run_pipeline() -> dict:
-    """Execute the full screening pipeline and return all artefacts.
+    """Execute the full screening pipeline and return all intermediate outputs.
 
-    Returns a dict containing every intermediate DataFrame and the
-    final summary, keyed by stage name.
+    Steps: exclusions → hard_filters → composite_scores → soft_scores →
+    shortlist → summary.
     """
-    # Stage 1: Exclusions
+    # --- Step 1: Exclusions — remove financial-sector tickers ---
     universe_df = _build_universe_df()
-    filtered_df, exclusion_log = apply_exclusions(universe_df)
+    filtered_df, exclusion_log_df = apply_exclusions(universe_df)
 
-    # Stage 2: Build metrics summary for surviving tickers
-    surviving_tickers = set(filtered_df["ticker"])
-    metrics_summary_df = _build_metrics_summary(surviving_tickers)
+    # --- Step 2: Build metrics summary for surviving tickers ---
+    surviving_tickers = sorted(filtered_df["ticker"].tolist())
+    metrics_summary_df = _build_metrics_summary_df(surviving_tickers)
 
-    # Stage 3: Hard filters (Tier 1)
+    # --- Step 3: Hard filters — remove tickers failing any Tier 1 check ---
     survivors_df, filter_log_df = apply_hard_filters(metrics_summary_df)
 
-    # Stage 4: Soft scores (Tier 2) — join pre-computed composite scores
-    all_non_excluded = set(metrics_summary_df["ticker"])
-    composite_scores_df = _build_composite_scores(all_non_excluded)
+    # --- Step 4: Composite scores for hard-filter survivors ---
+    #     Uses the real compute_all_composite_scores engine (not pre-baked).
+    survivor_list = survivors_df["ticker"].tolist()
+    all_metrics = _build_all_metrics(survivor_list)
+    composite_scores_df = compute_all_composite_scores(all_metrics)
+
+    # --- Step 5: Soft scoring — join composite scores, add rank ---
     ranked_df = apply_soft_scores(survivors_df, composite_scores_df)
 
-    # Stage 5: Shortlist (top 10)
+    # --- Step 6: Shortlist — top 10 with percentile and score_category ---
     shortlist_df = generate_shortlist(ranked_df, top_n=10)
 
-    # Stage 6: Summary
+    # --- Step 7: Summary statistics ---
     summary = generate_screener_summary(
         ranked_df, shortlist_df, filter_log_df,
+        total_universe=len(universe_df),
     )
 
     return {
         "universe_df": universe_df,
         "filtered_df": filtered_df,
-        "exclusion_log": exclusion_log,
+        "exclusion_log_df": exclusion_log_df,
         "metrics_summary_df": metrics_summary_df,
         "survivors_df": survivors_df,
         "filter_log_df": filter_log_df,
@@ -333,116 +322,115 @@ def _run_pipeline() -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(scope="module")
-def result() -> dict:
-    """Run the pipeline once for the entire test module."""
+def pipeline() -> dict:
+    """Run the full pipeline once and cache results for all tests."""
     return _run_pipeline()
 
 
 # ===========================================================================
-# 1. Exclusion stage
+# 1. Exclusion stage — 3 financial-sector tickers removed
 # ===========================================================================
 
 
 class TestExclusionStage:
-    """Verify that financial-sector tickers are removed before Tier 1."""
+    """Financial-sector tickers removed before Tier 1 hard filtering."""
 
-    def test_three_financials_excluded(self, result: dict) -> None:
-        """Exactly 3 financial-sector tickers must be excluded."""
-        excluded = set(result["exclusion_log"]["ticker"])
-        assert excluded == _EXCLUDED_TICKERS
+    def test_three_financial_tickers_excluded(self, pipeline: dict) -> None:
+        """Exactly 3 financial-sector tickers are excluded."""
+        excluded = set(pipeline["exclusion_log_df"]["ticker"])
+        assert excluded == set(TICKERS_FIN)
 
-    def test_exclusion_log_has_reasons(self, result: dict) -> None:
-        """Every excluded ticker must have a non-empty reason string."""
-        log = result["exclusion_log"]
+    def test_exclusion_log_has_reasons(self, pipeline: dict) -> None:
+        """Every excluded ticker has a non-empty reason string."""
+        log = pipeline["exclusion_log_df"]
         for _, row in log.iterrows():
-            assert len(row["reason"]) > 0, (
+            assert len(str(row["reason"])) > 0, (
                 f"Empty reason for excluded ticker {row['ticker']}"
             )
 
-    def test_filtered_df_has_17_tickers(self, result: dict) -> None:
-        """After exclusions, 17 of 20 tickers remain."""
-        assert len(result["filtered_df"]) == 17
+    def test_seventeen_tickers_survive_exclusions(self, pipeline: dict) -> None:
+        """17 of 20 tickers survive the exclusion stage."""
+        assert len(pipeline["filtered_df"]) == 17
 
-    def test_financials_absent_from_filtered(self, result: dict) -> None:
-        """No financial ticker appears in the filtered universe."""
-        tickers = set(result["filtered_df"]["ticker"])
-        assert tickers.isdisjoint(_EXCLUDED_TICKERS)
+    def test_no_financial_tickers_in_filtered(self, pipeline: dict) -> None:
+        """No financial-sector ticker appears in the filtered output."""
+        surviving = set(pipeline["filtered_df"]["ticker"])
+        assert surviving.isdisjoint(set(TICKERS_FIN))
 
-    def test_all_non_financials_present(self, result: dict) -> None:
-        """Every non-financial ticker survives exclusions."""
-        expected = {t["ticker"] for t in _ALL_TICKERS} - _EXCLUDED_TICKERS
-        actual = set(result["filtered_df"]["ticker"])
-        assert actual == expected
+    def test_all_non_financial_tickers_survive(self, pipeline: dict) -> None:
+        """All 17 non-financial tickers survive exclusions."""
+        surviving = set(pipeline["filtered_df"]["ticker"])
+        assert surviving == set(TICKERS_AFTER_EXCLUSIONS)
 
 
 # ===========================================================================
-# 2. Hard filter (Tier 1) stage
+# 2. Hard filter (Tier 1) stage — 5 tickers fail
 # ===========================================================================
 
 
 class TestHardFilterStage:
-    """Verify that exactly 5 low-quality stocks fail Tier 1."""
+    """Five hard-filter-failure tickers removed by Tier 1."""
 
-    def test_five_tickers_fail_tier1(self, result: dict) -> None:
-        """Exactly 5 tickers must be excluded by hard filters."""
-        survivors = set(result["survivors_df"]["ticker"])
-        failed = set(result["metrics_summary_df"]["ticker"]) - survivors
-        assert failed == _TIER1_FAIL_TICKERS
+    def test_five_tickers_fail_hard_filters(self, pipeline: dict) -> None:
+        """Exactly 5 tickers are removed by hard filters."""
+        n_in = len(pipeline["metrics_summary_df"])
+        n_out = len(pipeline["survivors_df"])
+        assert n_in - n_out == 5
 
-    def test_twelve_survivors(self, result: dict) -> None:
-        """17 after exclusions minus 5 failures = 12 survivors."""
-        assert len(result["survivors_df"]) == 12
+    def test_correct_tickers_fail(self, pipeline: dict) -> None:
+        """The 5 FAIL tickers are not in the survivors."""
+        surviving = set(pipeline["survivors_df"]["ticker"])
+        assert surviving.isdisjoint(set(TICKERS_FAIL))
 
-    def test_survivor_set_correct(self, result: dict) -> None:
-        """The surviving tickers match the expected set."""
-        actual = set(result["survivors_df"]["ticker"])
-        assert actual == _SURVIVOR_TICKERS
+    def test_twelve_survivors(self, pipeline: dict) -> None:
+        """12 tickers survive hard filters (5 HQ + 5 MQ + 2 LOW)."""
+        assert len(pipeline["survivors_df"]) == 12
 
-    def test_f1_roe_fails_roe_floor(self, result: dict) -> None:
-        """F1_ROE (ROE = 10 %) must fail specifically on roe_floor."""
-        log = result["filter_log_df"]
-        row = log[(log["ticker"] == "F1_ROE") & (log["filter_name"] == "roe_floor")]
+    def test_all_hq_mq_low_survive(self, pipeline: dict) -> None:
+        """All HQ, MQ, and LOW tickers survive hard filters."""
+        surviving = set(pipeline["survivors_df"]["ticker"])
+        assert surviving == set(TICKERS_AFTER_HARD)
+
+    def test_fail_roe_fails_roe_filter(self, pipeline: dict) -> None:
+        """FAIL_ROE (ROE = 10 %) fails the roe_floor filter specifically."""
+        log = pipeline["filter_log_df"]
+        row = log[(log["ticker"] == "FAIL_ROE") & (log["filter_name"] == "roe_floor")]
         assert len(row) == 1
         assert not bool(row.iloc[0]["pass_fail"])
 
-    def test_f2_eps_fails_eps_growth(self, result: dict) -> None:
-        """F2_EPS (CAGR = -2 %) must fail specifically on eps_growth."""
-        log = result["filter_log_df"]
-        row = log[(log["ticker"] == "F2_EPS") & (log["filter_name"] == "eps_growth")]
+    def test_fail_eps_fails_eps_growth_filter(self, pipeline: dict) -> None:
+        """FAIL_EPS (CAGR = −2 %) fails the eps_growth filter specifically."""
+        log = pipeline["filter_log_df"]
+        row = log[(log["ticker"] == "FAIL_EPS") & (log["filter_name"] == "eps_growth")]
         assert len(row) == 1
         assert not bool(row.iloc[0]["pass_fail"])
 
-    def test_f3_debt_fails_debt_sustainability(self, result: dict) -> None:
-        """F3_DEBT (8 yr payoff) must fail specifically on debt_sustainability."""
-        log = result["filter_log_df"]
+    def test_fail_debt_fails_debt_filter(self, pipeline: dict) -> None:
+        """FAIL_DEBT (8 yr payoff) fails the debt_sustainability filter."""
+        log = pipeline["filter_log_df"]
         row = log[
-            (log["ticker"] == "F3_DEBT")
+            (log["ticker"] == "FAIL_DEBT")
             & (log["filter_name"] == "debt_sustainability")
         ]
         assert len(row) == 1
         assert not bool(row.iloc[0]["pass_fail"])
 
-    def test_f4_earn_fails_earnings_consistency(self, result: dict) -> None:
-        """F4_EARN (5 profitable years) must fail earnings_consistency."""
-        log = result["filter_log_df"]
+    def test_fail_earn_fails_earnings_filter(self, pipeline: dict) -> None:
+        """FAIL_EARN (5 profitable years) fails earnings_consistency."""
+        log = pipeline["filter_log_df"]
         row = log[
-            (log["ticker"] == "F4_EARN")
+            (log["ticker"] == "FAIL_EARN")
             & (log["filter_name"] == "earnings_consistency")
         ]
         assert len(row) == 1
         assert not bool(row.iloc[0]["pass_fail"])
 
-    def test_f5_data_fails_data_sufficiency(self, result: dict) -> None:
-        """F5_DATA (5 years available) must fail data_sufficiency."""
-        log = result["filter_log_df"]
+    def test_fail_data_fails_data_sufficiency_filter(self, pipeline: dict) -> None:
+        """FAIL_DATA (3 years available) fails data_sufficiency."""
+        log = pipeline["filter_log_df"]
         row = log[
-            (log["ticker"] == "F5_DATA")
+            (log["ticker"] == "FAIL_DATA")
             & (log["filter_name"] == "data_sufficiency")
         ]
         assert len(row) == 1
@@ -455,37 +443,40 @@ class TestHardFilterStage:
 
 
 class TestFilterLogCompleteness:
-    """filter_log_df must have entries for every ticker and every filter."""
+    """filter_log_df has entries for every ticker × every filter."""
 
-    def test_filter_log_row_count(self, result: dict) -> None:
-        """17 tickers × 5 filters = 85 rows."""
-        assert len(result["filter_log_df"]) == 85
+    def test_every_ticker_has_entry(self, pipeline: dict) -> None:
+        """Every post-exclusion ticker appears in the filter log."""
+        log_tickers = set(pipeline["filter_log_df"]["ticker"])
+        expected = set(TICKERS_AFTER_EXCLUSIONS)
+        assert log_tickers == expected
 
-    def test_every_ticker_has_five_entries(self, result: dict) -> None:
-        """Each of the 17 post-exclusion tickers gets 5 filter rows."""
-        log = result["filter_log_df"]
-        for ticker in result["metrics_summary_df"]["ticker"]:
-            ticker_rows = log[log["ticker"] == ticker]
-            assert len(ticker_rows) == 5, (
-                f"{ticker} has {len(ticker_rows)} filter rows, expected 5"
-            )
+    def test_every_filter_applied(self, pipeline: dict) -> None:
+        """All 5 hard filters are present in the filter log."""
+        filters = set(pipeline["filter_log_df"]["filter_name"])
+        assert filters == EXPECTED_FILTERS
 
-    def test_all_five_filter_names_present(self, result: dict) -> None:
-        """All 5 expected filter names appear in the log."""
-        actual = set(result["filter_log_df"]["filter_name"].unique())
-        assert actual == _EXPECTED_FILTERS
+    def test_rows_per_ticker(self, pipeline: dict) -> None:
+        """Each ticker has exactly 5 rows (one per hard filter)."""
+        log = pipeline["filter_log_df"]
+        counts = log.groupby("ticker").size()
+        assert (counts == N_HARD_FILTERS).all()
 
-    def test_filter_log_columns(self, result: dict) -> None:
+    def test_total_filter_log_rows(self, pipeline: dict) -> None:
+        """Total rows = 17 tickers × 5 filters = 85."""
+        assert len(pipeline["filter_log_df"]) == 17 * N_HARD_FILTERS
+
+    def test_filter_log_columns(self, pipeline: dict) -> None:
         """Filter log must have the expected column schema."""
         expected_cols = {
             "ticker", "filter_name", "filter_value", "threshold", "pass_fail",
         }
-        assert set(result["filter_log_df"].columns) == expected_cols
+        assert set(pipeline["filter_log_df"].columns) == expected_cols
 
-    def test_survivors_pass_all_five_filters(self, result: dict) -> None:
+    def test_survivors_pass_all_five_filters(self, pipeline: dict) -> None:
         """Every surviving ticker must have pass_fail=True on all 5 filters."""
-        log = result["filter_log_df"]
-        for ticker in _SURVIVOR_TICKERS:
+        log = pipeline["filter_log_df"]
+        for ticker in TICKERS_AFTER_HARD:
             ticker_log = log[log["ticker"] == ticker]
             assert ticker_log["pass_fail"].all(), (
                 f"Survivor {ticker} has at least one False in filter log"
@@ -493,178 +484,276 @@ class TestFilterLogCompleteness:
 
 
 # ===========================================================================
-# 4. Shortlist stage
+# 4. Shortlist properties
 # ===========================================================================
 
 
-class TestShortlistStage:
-    """Shortlist must contain ≤ 10 stocks with correct ordering."""
+class TestShortlistProperties:
+    """Shortlist contains ≤ 10 stocks with correct ordering and metadata."""
 
-    def test_shortlist_has_10_stocks(self, result: dict) -> None:
-        """With 12 survivors and top_n=10, shortlist has exactly 10."""
-        assert len(result["shortlist_df"]) == 10
+    def test_shortlist_size_at_most_10(self, pipeline: dict) -> None:
+        """Shortlist contains ≤ 10 stocks (12 survivors, top_n=10)."""
+        assert len(pipeline["shortlist_df"]) <= 10
 
-    def test_shortlist_tickers_correct(self, result: dict) -> None:
-        """Shortlisted tickers are the 5 HQ + 5 MQ (highest scores)."""
-        actual = set(result["shortlist_df"]["ticker"])
-        assert actual == _SHORTLIST_TICKERS
+    def test_shortlist_size_exactly_10(self, pipeline: dict) -> None:
+        """With 12 survivors and top_n=10, shortlist has exactly 10 rows."""
+        assert len(pipeline["shortlist_df"]) == 10
 
-    def test_shortlist_ordered_descending(self, result: dict) -> None:
-        """Shortlist must be sorted by composite_score descending."""
-        scores = result["shortlist_df"]["composite_score"].tolist()
+    def test_ordered_by_composite_score_descending(self, pipeline: dict) -> None:
+        """Shortlist is sorted by composite_score descending."""
+        scores = pipeline["shortlist_df"]["composite_score"].tolist()
         assert scores == sorted(scores, reverse=True)
 
-    def test_shortlist_top_ticker_is_hq1(self, result: dict) -> None:
-        """HQ1 (composite_score=92) must be rank 1."""
-        top = result["shortlist_df"].iloc[0]
-        assert top["ticker"] == "HQ1"
-        assert top["rank"] == 1
+    def test_no_adjacent_ties(self, pipeline: dict) -> None:
+        """No two adjacent shortlist entries share the same composite_score.
 
-    def test_shortlist_scores_dominate_non_shortlist(self, result: dict) -> None:
-        """Every shortlisted score must exceed every non-shortlisted score."""
-        shortlist = result["shortlist_df"]
-        ranked = result["ranked_df"]
-        non_shortlist = ranked[
-            ranked["ticker"].isin(_NON_SHORTLIST_SURVIVORS)
-        ]
+        Mock data is designed with per-ticker variation so all 12 survivors
+        have distinct composite scores, ensuring deterministic ordering.
+        """
+        scores = pipeline["shortlist_df"]["composite_score"].tolist()
+        for i in range(len(scores) - 1):
+            assert scores[i] != scores[i + 1], (
+                f"Tie at positions {i} and {i + 1}: {scores[i]}"
+            )
+
+    def test_shortlist_outscores_non_shortlist(self, pipeline: dict) -> None:
+        """Every shortlist stock has composite_score > every non-shortlist survivor."""
+        ranked = pipeline["ranked_df"]
+        shortlist = pipeline["shortlist_df"]
+        shortlist_tickers = set(shortlist["ticker"])
+
+        non_shortlist = ranked[~ranked["ticker"].isin(shortlist_tickers)]
+        assert not non_shortlist.empty, "Expected 2 non-shortlist survivors."
+
         min_shortlist_score = shortlist["composite_score"].min()
         max_non_shortlist_score = non_shortlist["composite_score"].max()
         assert min_shortlist_score > max_non_shortlist_score, (
-            f"Min shortlist score ({min_shortlist_score}) must exceed "
-            f"max non-shortlist score ({max_non_shortlist_score})"
+            f"Min shortlist ({min_shortlist_score:.1f}) must exceed "
+            f"max non-shortlist ({max_non_shortlist_score:.1f})"
         )
 
-    def test_shortlist_has_metadata_columns(self, result: dict) -> None:
+    def test_hq_tickers_all_in_shortlist(self, pipeline: dict) -> None:
+        """All 5 high-quality tickers make the shortlist."""
+        shortlisted = set(pipeline["shortlist_df"]["ticker"])
+        assert set(TICKERS_HQ).issubset(shortlisted)
+
+    def test_mq_tickers_all_in_shortlist(self, pipeline: dict) -> None:
+        """All 5 medium-quality tickers make the shortlist (ranked 6-10)."""
+        shortlisted = set(pipeline["shortlist_df"]["ticker"])
+        assert set(TICKERS_MQ).issubset(shortlisted)
+
+    def test_low_tickers_not_in_shortlist(self, pipeline: dict) -> None:
+        """Both LOW tickers are ranked below the top-10 cutoff."""
+        shortlisted = set(pipeline["shortlist_df"]["ticker"])
+        assert shortlisted.isdisjoint(set(TICKERS_LOW))
+
+    def test_rank_column_present_and_sequential(self, pipeline: dict) -> None:
+        """Shortlist has a rank column starting at 1 with sequential values."""
+        ranks = pipeline["shortlist_df"]["rank"].tolist()
+        assert ranks == sorted(ranks)
+        assert ranks[0] == 1
+
+    def test_percentile_column_in_valid_range(self, pipeline: dict) -> None:
+        """Shortlist has a percentile column with values in (0, 100]."""
+        pctiles = pipeline["shortlist_df"]["percentile"].tolist()
+        assert all(0 < p <= 100 for p in pctiles)
+
+    def test_score_category_column_valid(self, pipeline: dict) -> None:
+        """Shortlist has a score_category column with valid values only."""
+        valid = {"Strong Buy", "Buy", "Hold", "Weak"}
+        categories = set(pipeline["shortlist_df"]["score_category"])
+        assert categories.issubset(valid)
+
+    def test_metadata_columns_present(self, pipeline: dict) -> None:
         """Shortlist must include rank, percentile, and score_category."""
-        cols = set(result["shortlist_df"].columns)
+        cols = set(pipeline["shortlist_df"].columns)
         assert {"rank", "percentile", "score_category"}.issubset(cols)
-
-    def test_shortlist_ranks_are_1_to_10(self, result: dict) -> None:
-        """Rank values must be consecutive 1 through 10."""
-        ranks = result["shortlist_df"]["rank"].tolist()
-        assert ranks == list(range(1, 11))
-
-    def test_score_categories_correct(self, result: dict) -> None:
-        """Verify score categories match composite_score values.
-
-        HQ1(92), HQ2(88), HQ3(85), HQ4(82) → "Strong Buy" (≥ 80)
-        HQ5(78) → "Buy" (≥ 70, < 80)
-        MQ1(65), MQ2(62) → "Hold" (≥ 60, < 70)
-        MQ3(58), MQ4(55), MQ5(52) → "Weak" (< 60)
-        """
-        df = result["shortlist_df"]
-
-        strong_buy = df[df["score_category"] == "Strong Buy"]["ticker"]
-        assert set(strong_buy) == {"HQ1", "HQ2", "HQ3", "HQ4"}
-
-        buy = df[df["score_category"] == "Buy"]["ticker"]
-        assert set(buy) == {"HQ5"}
-
-        hold = df[df["score_category"] == "Hold"]["ticker"]
-        assert set(hold) == {"MQ1", "MQ2"}
-
-        weak = df[df["score_category"] == "Weak"]["ticker"]
-        assert set(weak) == {"MQ3", "MQ4", "MQ5"}
-
-    def test_percentile_rank1_is_highest(self, result: dict) -> None:
-        """Rank 1 out of 12 total → percentile = 100.0."""
-        top = result["shortlist_df"].iloc[0]
-        assert top["percentile"] == 100.0
-
-    def test_non_shortlist_survivors_exist_in_ranked(self, result: dict) -> None:
-        """BT1 and BT2 must be present in ranked_df but absent from shortlist."""
-        ranked_tickers = set(result["ranked_df"]["ticker"])
-        shortlist_tickers = set(result["shortlist_df"]["ticker"])
-        assert _NON_SHORTLIST_SURVIVORS.issubset(ranked_tickers)
-        assert _NON_SHORTLIST_SURVIVORS.isdisjoint(shortlist_tickers)
 
 
 # ===========================================================================
-# 5. Screener summary
+# 5. Composite score tier ranking
+# ===========================================================================
+
+
+class TestCompositeScoreRanking:
+    """Composite scores reflect quality tiers: HQ > MQ > LOW."""
+
+    def test_hq_scores_above_mq(self, pipeline: dict) -> None:
+        """Every HQ ticker scores higher than every MQ ticker."""
+        ranked = pipeline["ranked_df"]
+        hq = ranked[ranked["ticker"].isin(TICKERS_HQ)]["composite_score"]
+        mq = ranked[ranked["ticker"].isin(TICKERS_MQ)]["composite_score"]
+        assert hq.min() > mq.max(), (
+            f"Worst HQ ({hq.min():.1f}) must beat best MQ ({mq.max():.1f})"
+        )
+
+    def test_mq_scores_above_low(self, pipeline: dict) -> None:
+        """Every MQ ticker scores higher than every LOW ticker."""
+        ranked = pipeline["ranked_df"]
+        mq = ranked[ranked["ticker"].isin(TICKERS_MQ)]["composite_score"]
+        low = ranked[ranked["ticker"].isin(TICKERS_LOW)]["composite_score"]
+        assert mq.min() > low.max(), (
+            f"Worst MQ ({mq.min():.1f}) must beat best LOW ({low.max():.1f})"
+        )
+
+    def test_all_composite_scores_in_range(self, pipeline: dict) -> None:
+        """All composite scores lie in [0, 100]."""
+        scores = pipeline["ranked_df"]["composite_score"]
+        assert (scores >= 0).all()
+        assert (scores <= 100).all()
+
+    def test_no_nan_composite_scores(self, pipeline: dict) -> None:
+        """No NaN values in composite_score for any survivor."""
+        assert pipeline["ranked_df"]["composite_score"].notna().all()
+
+    def test_hq_01_is_rank_1(self, pipeline: dict) -> None:
+        """HQ_01 (best HQ metrics across all criteria) must be ranked first."""
+        top = pipeline["shortlist_df"].iloc[0]
+        assert top["ticker"] == "HQ_01"
+        assert top["rank"] == 1
+
+    def test_hq_tickers_score_above_70(self, pipeline: dict) -> None:
+        """All HQ tickers score above 70 (at least 'Buy' territory)."""
+        ranked = pipeline["ranked_df"]
+        hq = ranked[ranked["ticker"].isin(TICKERS_HQ)]["composite_score"]
+        assert (hq > 70).all(), (
+            f"HQ scores: {hq.tolist()} — expected all > 70"
+        )
+
+    def test_low_tickers_score_below_30(self, pipeline: dict) -> None:
+        """LOW tickers score below 30 (deeply in 'Weak' territory)."""
+        ranked = pipeline["ranked_df"]
+        low = ranked[ranked["ticker"].isin(TICKERS_LOW)]["composite_score"]
+        assert (low < 30).all(), (
+            f"LOW scores: {low.tolist()} — expected all < 30"
+        )
+
+    def test_twelve_distinct_scores(self, pipeline: dict) -> None:
+        """All 12 survivors have distinct composite scores (no ties)."""
+        scores = pipeline["ranked_df"]["composite_score"].tolist()
+        assert len(set(scores)) == 12
+
+
+# ===========================================================================
+# 6. Screener summary
 # ===========================================================================
 
 
 class TestScreenerSummary:
-    """generate_screener_summary must produce correct aggregate counts."""
+    """generate_screener_summary produces correct pipeline counts."""
 
-    def test_after_exclusions_count(self, result: dict) -> None:
-        """after_exclusions = 17 (unique tickers in filter_log)."""
-        assert result["summary"]["after_exclusions"] == 17
+    def test_total_universe_count(self, pipeline: dict) -> None:
+        """total_universe equals 20 (all tickers before any filtering)."""
+        assert pipeline["summary"]["total_universe"] == 20
 
-    def test_after_tier1_count(self, result: dict) -> None:
+    def test_after_exclusions_count(self, pipeline: dict) -> None:
+        """after_exclusions = 17 unique tickers in filter_log_df."""
+        assert pipeline["summary"]["after_exclusions"] == 17
+
+    def test_after_tier1_count(self, pipeline: dict) -> None:
         """after_tier1 = 12 (survivors of hard filters)."""
-        assert result["summary"]["after_tier1"] == 12
+        assert pipeline["summary"]["after_tier1"] == 12
 
-    def test_shortlisted_count(self, result: dict) -> None:
-        """shortlisted = 10."""
-        assert result["summary"]["shortlisted"] == 10
+    def test_shortlisted_count(self, pipeline: dict) -> None:
+        """shortlisted = 10 (top_n=10 of 12 survivors)."""
+        assert pipeline["summary"]["shortlisted"] == 10
 
-    def test_top_score(self, result: dict) -> None:
-        """Top score across all survivors = 92.0 (HQ1)."""
-        assert result["summary"]["top_score"] == 92.0
+    def test_score_statistics_present(self, pipeline: dict) -> None:
+        """Summary contains top_score, median_score, bottom_score — all numeric."""
+        s = pipeline["summary"]
+        for key in ("top_score", "median_score", "bottom_score"):
+            assert key in s
+            assert isinstance(s[key], (int, float))
 
-    def test_bottom_score(self, result: dict) -> None:
-        """Bottom score across all survivors = 42.0 (BT2)."""
-        assert result["summary"]["bottom_score"] == 42.0
+    def test_top_score_equals_max_ranked(self, pipeline: dict) -> None:
+        """top_score equals the highest composite_score in ranked_df."""
+        expected = float(pipeline["ranked_df"]["composite_score"].max())
+        assert abs(pipeline["summary"]["top_score"] - expected) < 1e-6
 
-    def test_median_score(self, result: dict) -> None:
-        """Median of 12 survivor scores.
+    def test_bottom_score_equals_min_ranked(self, pipeline: dict) -> None:
+        """bottom_score equals the lowest composite_score in ranked_df."""
+        expected = float(pipeline["ranked_df"]["composite_score"].min())
+        assert abs(pipeline["summary"]["bottom_score"] - expected) < 1e-6
 
-        Sorted scores: 42, 45, 52, 55, 58, 62, 65, 78, 82, 85, 88, 92
-        Median of 12 values = (62 + 65) / 2 = 63.5
-        """
-        assert result["summary"]["median_score"] == 63.5
+    def test_sector_distribution_sums_to_shortlist_size(self, pipeline: dict) -> None:
+        """sector_distribution values sum to 10 (total shortlisted)."""
+        dist = pipeline["summary"]["sector_distribution"]
+        assert isinstance(dist, dict)
+        assert sum(dist.values()) == 10
 
-    def test_summary_has_all_expected_keys(self, result: dict) -> None:
-        """Summary dict must contain all required keys."""
+    def test_exchange_distribution_sums_to_shortlist_size(self, pipeline: dict) -> None:
+        """exchange_distribution values sum to 10 (total shortlisted)."""
+        dist = pipeline["summary"]["exchange_distribution"]
+        assert isinstance(dist, dict)
+        assert sum(dist.values()) == 10
+
+    def test_summary_has_all_required_keys(self, pipeline: dict) -> None:
+        """Summary dict contains every key defined in the data contract."""
         required = {
-            "after_exclusions", "after_tier1", "shortlisted",
+            "total_universe", "after_exclusions", "after_tier1", "shortlisted",
             "top_score", "median_score", "bottom_score",
             "sector_distribution", "exchange_distribution",
         }
-        assert required.issubset(set(result["summary"].keys()))
+        assert required.issubset(set(pipeline["summary"].keys()))
 
 
 # ===========================================================================
-# 6. Idempotency
+# 7. Idempotency — pipeline produces identical results on repeat
 # ===========================================================================
 
 
 class TestIdempotency:
-    """Running the pipeline twice on identical data produces identical output."""
+    """Running the same pipeline twice produces identical results."""
 
-    def test_idempotent_results(self) -> None:
-        """Two independent runs must produce identical shortlists."""
-        r1 = _run_pipeline()
-        r2 = _run_pipeline()
+    @pytest.fixture(scope="class")
+    def second_run(self) -> dict:
+        """Run the pipeline a second time independently."""
+        return _run_pipeline()
 
-        # Shortlist tickers identical
-        assert list(r1["shortlist_df"]["ticker"]) == list(
-            r2["shortlist_df"]["ticker"]
+    def test_exclusion_log_identical(
+        self, pipeline: dict, second_run: dict,
+    ) -> None:
+        """Exclusion logs match across two independent runs."""
+        pd.testing.assert_frame_equal(
+            pipeline["exclusion_log_df"].reset_index(drop=True),
+            second_run["exclusion_log_df"].reset_index(drop=True),
         )
 
-        # Composite scores identical
-        assert list(r1["shortlist_df"]["composite_score"]) == list(
-            r2["shortlist_df"]["composite_score"]
+    def test_filter_log_identical(
+        self, pipeline: dict, second_run: dict,
+    ) -> None:
+        """Hard-filter logs match across two independent runs."""
+        a = pipeline["filter_log_df"].sort_values(
+            ["ticker", "filter_name"],
+        ).reset_index(drop=True)
+        b = second_run["filter_log_df"].sort_values(
+            ["ticker", "filter_name"],
+        ).reset_index(drop=True)
+        pd.testing.assert_frame_equal(a, b)
+
+    def test_shortlist_tickers_identical(
+        self, pipeline: dict, second_run: dict,
+    ) -> None:
+        """Shortlist tickers and ordering match across runs."""
+        assert list(pipeline["shortlist_df"]["ticker"]) == list(
+            second_run["shortlist_df"]["ticker"]
         )
 
-        # Ranks identical
-        assert list(r1["shortlist_df"]["rank"]) == list(
-            r2["shortlist_df"]["rank"]
+    def test_shortlist_scores_identical(
+        self, pipeline: dict, second_run: dict,
+    ) -> None:
+        """Shortlist composite scores are numerically identical across runs."""
+        assert list(pipeline["shortlist_df"]["composite_score"]) == list(
+            second_run["shortlist_df"]["composite_score"]
         )
 
-        # Score categories identical
-        assert list(r1["shortlist_df"]["score_category"]) == list(
-            r2["shortlist_df"]["score_category"]
-        )
-
-        # Filter log shape identical
-        assert len(r1["filter_log_df"]) == len(r2["filter_log_df"])
-
-        # Summary counts identical
-        for key in ("after_exclusions", "after_tier1", "shortlisted",
-                    "top_score", "median_score", "bottom_score"):
-            assert r1["summary"][key] == r2["summary"][key], (
-                f"Summary key {key!r} differs: {r1['summary'][key]} "
-                f"vs {r2['summary'][key]}"
+    def test_summary_counts_identical(
+        self, pipeline: dict, second_run: dict,
+    ) -> None:
+        """Summary counts match across two independent runs."""
+        for key in ("total_universe", "after_exclusions", "after_tier1",
+                    "shortlisted", "top_score", "median_score", "bottom_score"):
+            assert pipeline["summary"][key] == second_run["summary"][key], (
+                f"Summary {key!r} differs: "
+                f"{pipeline['summary'][key]} vs {second_run['summary'][key]}"
             )

@@ -1,7 +1,7 @@
 """Removes structurally ineligible tickers before financial analysis.
 
 Exclusions are applied BEFORE Tier 1 hard filters and Tier 2 soft scoring.
-Three mechanisms, all config-driven via ``config/filter_config.yaml``:
+Four mechanisms, all config-driven via ``config/filter_config.yaml``:
 
 1. **SIC code ranges** — removes banks, insurers, REITs, holding cos.
 2. **Sector-level exclusion** — removes entire GICS sectors (if configured).
@@ -10,16 +10,35 @@ Three mechanisms, all config-driven via ``config/filter_config.yaml``:
 4. **Flags** — removes SPACs, shell companies (via ``is_<flag>`` columns).
 
 A ticker is excluded if it matches ANY mechanism.
+
+Data Lineage Contract
+---------------------
+Upstream producers:
+    - ``data_acquisition.universe.get_universe`` → ``universe_df`` with
+      columns ``ticker``, ``sector``, ``industry``, and optionally
+      ``sic_code``, ``is_SPAC``, ``is_shell_company``.
+
+Downstream consumers:
+    - ``screener.hard_filters.apply_hard_filters`` — receives
+      ``filtered_df`` (universe minus excluded tickers).
+    - ``screener.composite_ranker.generate_screener_summary`` — receives
+      ``exclusion_log_df`` for pipeline statistics.
+
+Config dependencies (all via ``get_threshold``):
+    - ``exclusions.sic_codes``              (list of [lo, hi] SIC ranges)
+    - ``exclusions.sectors``                (list of GICS sectors)
+    - ``exclusions.industry_keywords``      (list of keyword strings)
+    - ``exclusions.financial_sector_label``  (sector for keyword matching)
+    - ``exclusions.flags``                  (list of flag names)
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import pandas as pd
 
-from screener.filter_config_loader import get_config
+from screener.filter_config_loader import get_threshold
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +62,8 @@ def _build_sic_set(sic_ranges: list[list[int]]) -> set[int]:
     set[int]
         Every integer in the union of all ranges.
     """
+    # --- Expand each [lo, hi] pair into a contiguous range of integers.
+    #     Config example: [6020, 6029] → {6020, 6021, ..., 6029}.
     codes: set[int] = set()
     for pair in sic_ranges:
         if len(pair) == 2:
@@ -69,8 +90,10 @@ def _check_sic_exclusion(
         ``True`` for rows whose ``sic_code`` falls inside *sic_set*.
         All-``False`` if column is absent or *sic_set* is empty.
     """
+    # --- Guard: skip when the column is absent or no SIC codes to check.
     if "sic_code" not in df.columns or not sic_set:
         return pd.Series(False, index=df.index, dtype=bool)
+    # --- Coerce to numeric so non-integer SIC values become NaN (no match).
     sic = pd.to_numeric(df["sic_code"], errors="coerce")
     return sic.isin(sic_set)
 
@@ -92,8 +115,10 @@ def _check_sector_exclusion(
     -------
     pd.Series[bool]
     """
+    # --- Guard: skip when column or exclusion list is absent.
     if "sector" not in df.columns or not excluded_sectors:
         return pd.Series(False, index=df.index, dtype=bool)
+    # --- Case-insensitive comparison for robust matching.
     sector_lower = df["sector"].astype(str).str.lower()
     excluded_lower = {s.lower() for s in excluded_sectors}
     return sector_lower.isin(excluded_lower)
@@ -125,6 +150,7 @@ def _check_industry_pattern_exclusion(
     -------
     pd.Series[bool]
     """
+    # --- Guard: skip when required columns or keyword list are absent.
     if "industry" not in df.columns or "sector" not in df.columns:
         return pd.Series(False, index=df.index, dtype=bool)
     if not keywords:
@@ -133,6 +159,9 @@ def _check_industry_pattern_exclusion(
     industry = df["industry"].astype(str)
     sector = df["sector"].astype(str)
 
+    # --- Both conditions must be true: sector matches the financial
+    #     sector label AND industry contains at least one keyword.
+    #     This prevents excluding e.g. "Data Banks & Storage" in Tech.
     is_financial_sector = sector == financial_sector_label
     keyword_match = pd.Series(False, index=df.index, dtype=bool)
     for kw in keywords:
@@ -246,24 +275,23 @@ def apply_exclusions(
         *exclusion_log_df*: one row per excluded ticker.  Columns:
         ``ticker``, ``reason`` (semicolon-separated if multiple reasons).
     """
+    # --- Step 1: Guard — empty input produces empty output.
     if universe_df.empty:
         logger.warning("apply_exclusions: received empty DataFrame.")
         return pd.DataFrame(), pd.DataFrame(columns=["ticker", "reason"])
 
-    cfg = get_config()
-    excl_cfg: dict[str, Any] = cfg.get("exclusions", {})
-
-    # Read config values
-    sic_ranges: list[list[int]] = excl_cfg.get("sic_codes", [])
+    # --- Step 2: Read all exclusion config via get_threshold (fail-fast).
+    sic_ranges: list[list[int]] = get_threshold("exclusions.sic_codes")
     sic_set = _build_sic_set(sic_ranges)
-    excluded_sectors: list[str] = excl_cfg.get("sectors", [])
-    keywords: list[str] = excl_cfg.get("industry_keywords", [])
-    financial_sector_label: str = excl_cfg.get(
-        "financial_sector_label", "Financial Services",
+    excluded_sectors: list[str] = get_threshold("exclusions.sectors")
+    keywords: list[str] = get_threshold("exclusions.industry_keywords")
+    financial_sector_label: str = get_threshold(
+        "exclusions.financial_sector_label",
     )
-    flags: list[str] = excl_cfg.get("flags", [])
+    flags: list[str] = get_threshold("exclusions.flags")
 
-    # Evaluate each exclusion mechanism
+    # --- Step 3: Evaluate each exclusion mechanism independently.
+    #     A ticker is excluded if ANY mechanism matches.
     sic_mask = _check_sic_exclusion(universe_df, sic_set)
     sector_mask = _check_sector_exclusion(universe_df, excluded_sectors)
     industry_mask = _check_industry_pattern_exclusion(
@@ -271,12 +299,15 @@ def apply_exclusions(
     )
     flag_mask = _check_flag_exclusion(universe_df, flags)
 
+    # --- Step 4: Combine all masks with OR (any match = excluded).
     combined_mask = sic_mask | sector_mask | industry_mask | flag_mask
 
+    # --- Step 5: Build the exclusion log (one row per excluded ticker).
     exclusion_log = _build_exclusion_log(
         universe_df, sic_mask, sector_mask, industry_mask, flag_mask,
     )
 
+    # --- Step 6: Return surviving tickers (not in any exclusion mask).
     filtered_df = universe_df.loc[~combined_mask].reset_index(drop=True)
 
     n_excluded = int(combined_mask.sum())

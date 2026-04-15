@@ -6,6 +6,27 @@ composite score is performed upstream in
 joins those pre-computed scores onto the set of tickers that survived
 Tier 1 hard filtering, adds a 1-based rank column, and returns the result
 sorted by ``composite_score`` descending.
+
+Data Lineage Contract
+---------------------
+Upstream producers:
+    - ``screener.hard_filters.apply_hard_filters`` → ``survivors_df``
+      (tickers that passed all five Tier 1 hard filters).
+    - ``metrics_engine.composite_score.compute_all_composite_scores``
+      → ``composite_scores_df`` (``ticker``, ``composite_score``,
+      ``score_*`` per-criterion columns, sorted descending).
+
+Downstream consumers:
+    - ``screener.composite_ranker.generate_shortlist`` — receives the
+      ranked DataFrame with ``rank`` column for top-N selection.
+    - ``screener.composite_ranker.generate_screener_summary`` — reads
+      ranked DataFrame for aggregate statistics.
+    - Module 4 (valuation_reports) — reads ranked output for report
+      generation.
+
+Config dependencies:
+    - None.  This module does not read ``filter_config.yaml``; all
+      scoring logic is handled upstream by ``composite_score.py``.
 """
 
 from __future__ import annotations
@@ -42,12 +63,16 @@ def _join_scores(
         *survivors_df* enriched with score columns.  Tickers absent
         from *composite_scores_df* receive ``NaN`` for all score columns.
     """
+    # --- Step 1: Guard — if no composite scores exist, add NaN column.
     if composite_scores_df.empty:
         logger.warning("_join_scores: composite_scores_df is empty.")
         result = survivors_df.copy()
         result["composite_score"] = float("nan")
         return result
 
+    # --- Step 2: Left-join score columns onto survivors by ticker.
+    #     Left join ensures every survivor gets a row even if somehow
+    #     absent from the composite scores (gets NaN for score columns).
     score_cols = [c for c in composite_scores_df.columns if c != "ticker"]
     merged = survivors_df.merge(
         composite_scores_df[["ticker"] + score_cols],
@@ -55,6 +80,8 @@ def _join_scores(
         how="left",
         suffixes=("", "_dup"),
     )
+
+    # --- Step 3: Drop any duplicate columns created by the merge.
     dup_cols = [c for c in merged.columns if c.endswith("_dup")]
     if dup_cols:
         merged = merged.drop(columns=dup_cols)
@@ -74,10 +101,13 @@ def _add_rank(df: pd.DataFrame) -> pd.DataFrame:
     pd.DataFrame
         Sorted copy with an integer ``rank`` column (1 = best).
     """
+    # --- Step 1: Sort descending by composite_score (best first).
     sorted_df = (
         df.sort_values("composite_score", ascending=False)
         .reset_index(drop=True)
     )
+
+    # --- Step 2: Assign 1-based integer rank (1 = highest composite score).
     sorted_df["rank"] = range(1, len(sorted_df) + 1)
     return sorted_df
 
@@ -134,11 +164,18 @@ def apply_soft_scores(
         absent from *composite_scores_df* receive ``composite_score = NaN``
         and are ranked last.
     """
+    # --- Step 1: Guard — no survivors means nothing to rank.
     if survivors_df.empty:
         logger.warning("apply_soft_scores: no survivors to score.")
         return pd.DataFrame()
 
+    # --- Step 2: Left-join composite scores onto survivors by ticker.
     scored = _join_scores(survivors_df, composite_scores_df)
+
+    # --- Step 3: Sort by composite_score descending and assign 1-based rank.
     ranked = _add_rank(scored)
+
+    # --- Step 4: Log the top-ranked ticker for quick sanity checks.
     _log_tier2_summary(ranked)
+
     return ranked
