@@ -234,11 +234,18 @@ valuation:
       probability: 0.25
 
   hurdle_rate: 0.15               # Minimum acceptable owner earnings yield for BUY (F2)
+  bond_yield_multiplier: 2.0      # F2: initial return must exceed multiplier × risk-free rate
+
+  fallback_historical_pe: 15.0      # F14: industry median P/E used when historical P/E is unavailable
 
   # Margin of safety buy-below thresholds (F15)
   mos_conservative: 0.50          # 50% MoS — most conservative entry
   mos_moderate: 0.33              # 33% MoS — standard entry
   mos_aggressive: 0.20            # 20% MoS — aggressive entry
+
+  # Earnings Yield vs. Bond Yield (F16)
+  earnings_yield:
+    min_spread_over_rfr_pct: 0.02   # Spread ≥ 2% for equities to be "attractive"
 
 
 # ---------------------------------------------------------------------------

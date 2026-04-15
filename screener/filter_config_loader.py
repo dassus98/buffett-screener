@@ -5,6 +5,34 @@ modules. No other module may call yaml.safe_load() directly (the sole exception
 is data_acquisition/api_config.py, which must load config before this module is
 importable without creating a circular dependency).
 
+Data Lineage Contract
+---------------------
+Upstream source:
+    - ``config/filter_config.yaml`` — single source of truth for every
+      threshold, weight, and parameter used anywhere in the codebase.
+      Loaded via ``yaml.safe_load()`` on first access; cached in
+      ``_config_cache`` for the process lifetime.
+
+Downstream consumers (every module that reads thresholds or weights):
+    - ``metrics_engine.profitability`` → ``get_threshold("hard_filters.min_avg_roe")``
+    - ``metrics_engine.composite_score`` → soft_scores section weights/breakpoints
+    - ``screener.hard_filters`` → hard_filters section thresholds
+    - ``screener.soft_filters`` → soft_scores section breakpoints
+    - ``screener.exclusions`` → exclusions section lists
+    - ``metrics_engine.leverage``, ``metrics_engine.growth``,
+      ``metrics_engine.valuation``, ``metrics_engine.returns``
+      → various hard_filters and valuation thresholds
+    - ``data_acquisition.universe`` → universe section (min_market_cap_usd, exchanges)
+    - ``data_acquisition.data_quality`` → data_quality section
+
+Config dependencies:
+    - Requires ``config/filter_config.yaml`` at project root.
+    - No environment variables or external services.
+
+Validation rules:
+    - All 10 required top-level sections must exist (see ``_REQUIRED_SECTIONS``).
+    - Soft score weights (10 criteria) must sum to 1.0 within tolerance.
+
 Usage
 -----
     from screener.filter_config_loader import get_config, get_threshold
@@ -28,8 +56,8 @@ get_threshold(path) -> Any
 reload_config() -> dict
     Force a re-read from disk and reset the cache. Intended for tests only.
 ConfigError
-    Raised when a requested key path is not found in the config.
-ConfigValidationError
+    Base exception for all config-related errors.
+ConfigValidationError(ConfigError)
     Raised when required keys are absent or weights don't sum to 1.0.
 """
 
@@ -90,8 +118,11 @@ class ConfigError(Exception):
     """
 
 
-class ConfigValidationError(Exception):
+class ConfigValidationError(ConfigError):
     """Raised when filter_config.yaml is structurally invalid.
+
+    Inherits from ``ConfigError`` so callers that catch ``ConfigError`` will
+    also catch validation failures (missing sections, invalid weights, etc.).
 
     Parameters
     ----------

@@ -20,9 +20,10 @@ What is verified
 3. Composite-score ranking: KO_MOCK strictly outscores WEAK_MOCK.
 4. All per-criterion ``score_*`` values lie in [0, 100]; ``composite_score``
    column contains no NaN.
-5. Hardcoded-value audit: documents the eight ``cfg.get(key, fallback)``
-   matches found in ``metrics_engine/`` and confirms no bare threshold
-   literals appear outside config reads.
+5. Hardcoded-value audit: confirms no bare threshold literals (0.15, 0.25,
+   0.30, 0.40) appear in executable code within ``metrics_engine/``. All
+   ``cfg.get(key, fallback)`` patterns were eliminated in favour of fail-fast
+   ``cfg["key"]`` access; the only remaining match is a documentary comment.
 6. mypy type-check: ``metrics_engine/`` passes with zero errors.
 """
 
@@ -718,33 +719,30 @@ class TestMarginOfSafety:
 class TestHardcodedValueAudit:
     """Verify that no bare threshold literals appear in metrics_engine/ source.
 
-    The eight matches found by the canonical grep command are all of the form
-    ``cfg.get("key", fallback_default)`` — they are safe fallback defaults,
-    not hardcoded comparisons.  This test documents those findings and fails
-    if any *new* bare literal is introduced outside a ``cfg.get`` call.
+    After Task 14 all ``cfg.get(key, fallback)`` patterns were eliminated
+    from composite_score.py in favour of fail-fast ``cfg["key"]`` access.
+    The only remaining match is a documentary comment in valuation.py.
+    This test fails if any new bare literal is introduced in executable code.
     """
 
-    # The eight expected matches from:
-    #   grep -rn "0\\.15\\|0\\.40\\|0\\.25\\|0\\.30" metrics_engine/ --include="*.py"
-    #     | grep -v "test_\\|__pycache__"
-    # All are ``cfg.get(key, fallback)`` patterns.
+    # Current grep matches from:
+    #   grep -rn "0\.15\|0\.40\|0\.25\|0\.30" metrics_engine/ --include="*.py"
+    #     | grep -v "test_\|__pycache__"
+    # All occurrences are in comments or docstrings — no bare threshold
+    # literals in executable code.  After Task 14 all ``cfg.get(key, fallback)``
+    # patterns in composite_score.py were replaced with fail-fast ``cfg["key"]``
+    # direct access, eliminating hardcoded fallback defaults.
     KNOWN_ACCEPTABLE_PATTERNS = [
-        "profitability.py",      # cfg.get("hard_filters", ...).get("min_avg_roe", 0.15)
-        "valuation.py",          # cfg.get("hurdle_rate", 0.15)
-        "valuation.py",          # cfg.get("buy_min_mos", 0.25)
-        "composite_score.py",    # cfg.get("excellent_threshold", 0.30)
-        "composite_score.py",    # cfg.get("excellent_capex_ratio", 0.25)
-        "composite_score.py",    # cfg.get("excellent", 0.15)
-        "composite_score.py",    # cfg.get("good", 0.15)
-        "composite_score.py",    # cfg.get("fail", 0.30)
+        "valuation.py:309",  # comment: "weights must sum to 1.0: 0.25 + 0.50 + 0.25"
     ]
 
     def test_no_new_bare_literals(self):
         """No hardcoded comparisons may appear outside cfg.get() calls.
 
         Scans for the four sentinel values (0.15, 0.25, 0.30, 0.40) that are
-        threshold candidates in the scoring system.  Every match must contain
-        'cfg.get' on the same line, confirming it is a fallback default.
+        threshold candidates in the scoring system.  Matches in comments,
+        docstrings, or config-access lines are acceptable; anything else is
+        a violation.
         """
         proj = Path(__file__).parent.parent / "metrics_engine"
         pattern_values = ["0.15", "0.40", "0.25", "0.30"]
@@ -755,15 +753,19 @@ class TestHardcodedValueAudit:
             for lineno, line in enumerate(py_file.read_text().splitlines(), 1):
                 for val in pattern_values:
                     if val in line:
-                        # Acceptable if the value appears in a cfg.get() call or comment/docstring
                         stripped = line.strip()
+                        # --- Acceptable categories ---
                         is_comment = stripped.startswith("#")
                         is_docstring_fragment = stripped.startswith(('"""', "'''", "*"))
-                        is_config_read = "cfg.get" in line or "get_config" in line
+                        is_config_read = (
+                            "cfg.get" in line
+                            or "get_config" in line
+                            or "get_threshold" in line
+                        )
                         if not (is_comment or is_docstring_fragment or is_config_read):
                             violations.append(f"{py_file.name}:{lineno}: {stripped!r}")
         assert not violations, (
-            "Bare threshold literals found outside cfg.get() calls "
+            "Bare threshold literals found in executable code "
             f"in metrics_engine/:\n" + "\n".join(violations)
         )
 

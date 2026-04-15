@@ -1,4 +1,38 @@
-"""Computes gross, operating, net, and EBITDA margins along with their trailing averages, standard deviations, and trend direction."""
+"""Profitability formula functions: ROE (F3), Gross Margin (F7), SGA Ratio (F8),
+Net Margin Consistency (F10).
+
+Each public function accepts single-ticker DataFrames from DuckDB (via
+``data_acquisition.store.read_table``) and returns a ``(annual_df, summary_dict)``
+tuple consumed by the Module 2 orchestrator (``metrics_engine.__init__``).
+
+Data Lineage Contract
+---------------------
+Upstream producers:
+    - ``data_acquisition.store.read_table("income_statement")``
+      → provides ``fiscal_year``, ``net_income``, ``total_revenue``, ``gross_profit``,
+        ``sga`` columns (canonical names from ``data_acquisition.schema.py``).
+    - ``data_acquisition.store.read_table("balance_sheet")``
+      → provides ``fiscal_year``, ``shareholders_equity`` columns.
+    - Column names are identity-mapped from ``schema.CANONICAL_COLUMNS``.
+
+Downstream consumers:
+    - ``metrics_engine.__init__._compute_profitability``
+      → calls all four functions, collects summaries for composite scoring.
+    - ``metrics_engine.composite_score`` (Tier 2 scoring)
+      → reads summary keys: ``avg_roe``, ``roe_stdev``, ``avg_gross_margin``,
+        ``avg_sga_ratio``, ``profitable_years``.
+    - ``screener.hard_filters``
+      → reads summary keys: ``avg_roe``, ``profitable_years`` for Tier 1 pass/fail.
+    - ``screener.soft_filters``
+      → reads summary values for composite ranking.
+
+Config dependencies:
+    - ``config/filter_config.yaml → hard_filters.min_avg_roe``
+      (used by ``compute_roe`` to count ``years_above_threshold``).
+    - All thresholds loaded via ``screener.filter_config_loader.get_threshold()``.
+
+Authoritative spec: docs/FORMULAS.md §F3, §F7, §F8, §F10.
+"""
 
 from __future__ import annotations
 
@@ -8,13 +42,19 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from screener.filter_config_loader import get_config
+from screener.filter_config_loader import get_threshold
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Infrastructure constants (NOT business thresholds — those come from config)
+# ---------------------------------------------------------------------------
 
 # Minimum absolute slope magnitude for classifying a trend as non-stable.
 # Applied to net-margin values (range 0–1); 0.005 ≈ 0.5 percentage-point
 # shift per year — separates directionless noise from a sustained move.
+# This is a statistical sensitivity constant, not a configurable business
+# threshold, so it lives here rather than in filter_config.yaml.
 _TREND_SLOPE_THRESHOLD: float = 0.005
 
 
@@ -103,33 +143,48 @@ def compute_roe(
         *annual_df* columns: ``fiscal_year``, ``roe``, ``negative_equity``.
         *summary* keys: ``avg_roe``, ``roe_stdev``, ``years_above_threshold``.
     """
-    cfg = get_config()
-    roe_threshold: float = float(cfg.get("hard_filters", {}).get("min_avg_roe", 0.15))
+    # ROE threshold from config — used only for the years_above_threshold count
+    # in the summary dict, not for any filtering decision here.
+    roe_threshold: float = float(get_threshold("hard_filters.min_avg_roe"))
 
+    # --- Step 1: Isolate required columns, sorted ascending by fiscal year ---
     inc = income_df[["fiscal_year", "net_income"]].sort_values("fiscal_year").reset_index(drop=True)
     bal = balance_df[["fiscal_year", "shareholders_equity"]].sort_values("fiscal_year").reset_index(drop=True)
+
+    # --- Step 2: Build prior-year equity by shifting fiscal_year forward 1 year ---
+    # This aligns equity_{t-1} with the income statement row for year t,
+    # enabling the average-equity denominator: (equity_{t-1} + equity_t) / 2.
     bal_prior = bal.rename(columns={"shareholders_equity": "equity_prior"}).copy()
     bal_prior["fiscal_year"] = bal_prior["fiscal_year"] + 1
 
+    # --- Step 3: Join income with current and prior equity on fiscal_year ---
     df = inc.merge(bal.rename(columns={"shareholders_equity": "equity_t"}), on="fiscal_year", how="left")
     df = df.merge(bal_prior, on="fiscal_year", how="left")
 
+    # --- Step 4: Compute ROE per year, handling negative equity edge case ---
+    # Per FORMULAS.md F3: negative equity → ROE is mathematically meaningless.
+    # Set ROE = NaN, flag negative_equity = True. Do NOT drop the security.
     avg_eq = _compute_avg_equity(df["equity_t"], df["equity_prior"])
     valid_mask = avg_eq.notna() & (avg_eq > 0)
     roe_series = (df["net_income"].astype(float) / avg_eq.where(valid_mask)).where(valid_mask, other=np.nan)
 
+    # Log each year where equity is non-positive (e.g., large buyback programs)
     for yr in df.loc[~valid_mask, "fiscal_year"].tolist():
         logger.warning("ROE undefined for fiscal_year=%s: avg_equity ≤ 0. Setting ROE=NaN.", yr)
 
+    # --- Step 5: Build output DataFrame and 10-year summary ---
     annual_df = pd.DataFrame({
         "fiscal_year": df["fiscal_year"].values,
         "roe": roe_series.values,
         "negative_equity": (~valid_mask).values,
     })
+
     valid_roe = roe_series.dropna()
     avg_roe = float(valid_roe.mean()) if not valid_roe.empty else float("nan")
     roe_stdev = float(valid_roe.std()) if len(valid_roe) > 1 else float("nan")
+    # Count years where individual-year ROE meets or exceeds the hard filter threshold
     years_above = int((valid_roe >= roe_threshold).sum())
+
     return annual_df, {"avg_roe": avg_roe, "roe_stdev": roe_stdev, "years_above_threshold": years_above}
 
 
@@ -154,17 +209,23 @@ def compute_gross_margin(
         *annual_df* columns: ``fiscal_year``, ``gross_margin``.
         *summary* keys: ``avg_gross_margin``, ``min_gross_margin``.
     """
+    # Isolate required columns, sorted ascending by fiscal year
     df = income_df[["fiscal_year", "gross_profit", "total_revenue"]].sort_values("fiscal_year").reset_index(drop=True)
 
+    # Per FORMULAS.md F7: revenue = 0 → cannot compute margin for that year
     invalid = df["total_revenue"].isna() | (df["total_revenue"] == 0)
     for yr in df.loc[invalid, "fiscal_year"].tolist():
         logger.warning("Gross margin undefined for fiscal_year=%s: total_revenue=0. Setting NaN.", yr)
 
+    # Gross Margin = gross_profit / total_revenue (per year)
+    # Negative gross profit is valid (selling below cost) — include in average
     gross_margin = (
         df["gross_profit"].astype(float) / df["total_revenue"].where(~invalid).astype(float)
     ).where(~invalid, other=np.nan)
 
     annual_df = pd.DataFrame({"fiscal_year": df["fiscal_year"].values, "gross_margin": gross_margin.values})
+
+    # Summary: average and minimum across all valid (non-NaN) years
     valid = gross_margin.dropna()
     avg_gm = float(valid.mean()) if not valid.empty else float("nan")
     min_gm = float(valid.min()) if not valid.empty else float("nan")
@@ -192,17 +253,23 @@ def compute_sga_ratio(
         *annual_df* columns: ``fiscal_year``, ``sga_ratio``.
         *summary* keys: ``avg_sga_ratio``.
     """
+    # Isolate required columns, sorted ascending by fiscal year
     df = income_df[["fiscal_year", "sga", "gross_profit"]].sort_values("fiscal_year").reset_index(drop=True)
 
+    # Per FORMULAS.md F8: gross_profit ≤ 0 → ratio is meaningless
+    # This can happen for companies selling below cost; set to NaN and log
     invalid = df["gross_profit"].isna() | (df["gross_profit"] <= 0)
     for yr in df.loc[invalid, "fiscal_year"].tolist():
         logger.warning("SGA ratio undefined for fiscal_year=%s: gross_profit ≤ 0. Setting NaN.", yr)
 
+    # SGA Ratio = SG&A / gross_profit (per year)
     sga_ratio = (
         df["sga"].astype(float) / df["gross_profit"].where(~invalid).astype(float)
     ).where(~invalid, other=np.nan)
 
     annual_df = pd.DataFrame({"fiscal_year": df["fiscal_year"].values, "sga_ratio": sga_ratio.values})
+
+    # Summary: average across all valid (non-NaN) years
     valid = sga_ratio.dropna()
     avg_sga = float(valid.mean()) if not valid.empty else float("nan")
     return annual_df, {"avg_sga_ratio": avg_sga}
@@ -236,19 +303,31 @@ def compute_net_margin(
     whether revenue is zero.  Zero-revenue years are excluded from the margin
     average but still assessed for profitability.
     """
+    # Isolate required columns, sorted ascending by fiscal year
     df = income_df[["fiscal_year", "net_income", "total_revenue"]].sort_values("fiscal_year").reset_index(drop=True)
 
+    # Per FORMULAS.md F10: revenue = 0 → skip that year in the margin average
     invalid = df["total_revenue"].isna() | (df["total_revenue"] == 0)
     for yr in df.loc[invalid, "fiscal_year"].tolist():
         logger.warning("Net margin undefined for fiscal_year=%s: total_revenue=0. Setting NaN.", yr)
 
+    # Net Margin = net_income / total_revenue (per year)
     net_margin = (
         df["net_income"].astype(float) / df["total_revenue"].where(~invalid).astype(float)
     ).where(~invalid, other=np.nan)
 
     annual_df = pd.DataFrame({"fiscal_year": df["fiscal_year"].values, "net_margin": net_margin.values})
+
+    # profitable_years: count of rows where net_income > 0, regardless of
+    # whether revenue is zero. Zero net income does NOT count as profitable.
     profitable_years = int((df["net_income"] > 0).sum())
+
+    # Summary statistics across valid (non-NaN) margin years
     valid = net_margin.dropna()
     avg_nm = float(valid.mean()) if not valid.empty else float("nan")
+
+    # Trend direction via OLS slope: "improving" / "deteriorating" / "stable"
+    # per FORMULAS.md F10 specification (slope threshold = 0.005)
     trend = _compute_trend(valid.values)
+
     return annual_df, {"avg_net_margin": avg_nm, "profitable_years": profitable_years, "trend": trend}

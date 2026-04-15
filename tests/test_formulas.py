@@ -1441,6 +1441,125 @@ class TestComputeCompositeScore:
         result = compute_composite_score({})
         assert result["composite_score"] == pytest.approx(0.0)
 
+    def test_roe_variance_penalty_applied(self):
+        """ROE stdev > 5% triggers a 15-point penalty.
+
+        avg_roe=0.20 → base 75.0; stdev=0.10 > 0.05 → 75 - 15 = 60.
+        """
+        s = {**_mock_summary(), "roe_stdev": 0.10}
+        result = compute_composite_score(s)
+        roe_score = result["scores_detail"]["roe"]["score"]
+        assert roe_score == pytest.approx(60.0, abs=0.5)
+
+    def test_sga_score_excellent(self):
+        """avg_sga_ratio=0.25 < excellent_threshold (0.30) → score 100."""
+        s = {**_mock_summary(), "avg_sga_ratio": 0.25}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["sga_ratio"]["score"] == pytest.approx(100.0)
+
+    def test_sga_score_midrange(self):
+        """avg_sga_ratio=0.55 between 0.30 (100) and 0.80 (0) → score 50."""
+        s = {**_mock_summary(), "avg_sga_ratio": 0.55}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["sga_ratio"]["score"] == pytest.approx(50.0)
+
+    def test_eps_growth_decline_years_3_applies_0_6_multiplier(self):
+        """3+ decline years → multiplier = 0.6.
+
+        cagr=0.15 → cagr_score=75.0; mult=0.6 → 75 × 0.6 = 45.0.
+        """
+        s = {**_mock_summary(), "decline_years": 3}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["eps_growth"]["score"] == pytest.approx(45.0)
+
+    def test_eps_growth_decline_years_1_applies_0_9_multiplier(self):
+        """1 decline year → multiplier = 0.9.
+
+        cagr=0.15 → cagr_score=75.0; mult=0.9 → 75 × 0.9 = 67.5.
+        """
+        s = {**_mock_summary(), "decline_years": 1}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["eps_growth"]["score"] == pytest.approx(67.5)
+
+    def test_debt_score_midrange(self):
+        """avg_de=0.50 between excellent (0.20→100) and fail (0.80→0) → score 50."""
+        s = {**_mock_summary(), "avg_de_10yr": 0.50}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["debt_conservatism"]["score"] == pytest.approx(50.0)
+
+    def test_capex_score_excellent(self):
+        """avg_capex_to_ni=0.25 = excellent threshold → score 100."""
+        s = {**_mock_summary(), "avg_capex_to_ni": 0.25}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["capital_efficiency"]["score"] == pytest.approx(100.0)
+
+    def test_capex_score_midrange(self):
+        """avg_capex_to_ni=0.50 between 0.25 (100) and 0.75 (0) → score 50."""
+        s = {**_mock_summary(), "avg_capex_to_ni": 0.50}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["capital_efficiency"]["score"] == pytest.approx(50.0)
+
+    def test_oe_growth_known_value(self):
+        """owner_earnings_cagr=0.15 → same breakpoints as EPS: score 75.0."""
+        s = {**_mock_summary(), "owner_earnings_cagr": 0.15}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["owner_earnings_growth"]["score"] == pytest.approx(75.0)
+
+    def test_retained_earnings_excellent_score(self):
+        """return_on_retained=0.15 = excellent threshold → score 100."""
+        s = {**_mock_summary(), "return_on_retained": 0.15}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["retained_earnings_return"]["score"] == pytest.approx(100.0)
+
+    def test_retained_earnings_negative_score_zero(self):
+        """return_on_retained=-0.05 (negative) → score 0."""
+        s = {**_mock_summary(), "return_on_retained": -0.05}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["retained_earnings_return"]["score"] == pytest.approx(0.0)
+
+    def test_interest_coverage_good_zone(self):
+        """avg_interest_pct_10yr=0.12 between excellent (0.10) and good (0.15) → flat 70."""
+        s = {**_mock_summary(), "avg_interest_pct_10yr": 0.12}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["interest_coverage"]["score"] == pytest.approx(70.0)
+
+    def test_interest_coverage_fail_zone(self):
+        """avg_interest_pct_10yr=0.35 ≥ fail (0.30) → 0."""
+        s = {**_mock_summary(), "avg_interest_pct_10yr": 0.35}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["interest_coverage"]["score"] == pytest.approx(0.0)
+
+    def test_gross_margin_score_at_60_percent(self):
+        """avg_gross_margin=0.60 at top breakpoint → score 100."""
+        s = {**_mock_summary(), "avg_gross_margin": 0.60}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["gross_margin"]["score"] == pytest.approx(100.0)
+
+    def test_buyback_midrange_at_breakpoint(self):
+        """buyback_pct=0.05 at breakpoint → score 40."""
+        s = {**_mock_summary(), "buyback_pct": 0.05}
+        result = compute_composite_score(s)
+        assert result["scores_detail"]["buyback"]["score"] == pytest.approx(40.0)
+
+    def test_all_perfect_scores_composite_is_100(self):
+        """When every criterion scores 100, composite = 100 (weights sum to 1.0)."""
+        perfect = {
+            "avg_roe": 0.30,             # well above ceiling (0.25) → 100
+            "roe_stdev": 0.01,           # well below penalty threshold → no penalty
+            "avg_gross_margin": 0.70,    # above top breakpoint → 100
+            "avg_sga_ratio": 0.20,       # below excellent → 100
+            "eps_cagr": 0.25,            # above ceiling → 100
+            "decline_years": 0,          # multiplier = 1.0
+            "avg_de_10yr": 0.10,         # below excellent → 100
+            "owner_earnings_cagr": 0.25, # above ceiling → 100
+            "avg_capex_to_ni": 0.10,     # below excellent → 100
+            "buyback_pct": 0.20,         # above top breakpoint → 100
+            "return_on_retained": 0.20,  # above excellent → 100
+            "avg_interest_pct_10yr": 0.05,  # below excellent → 100
+        }
+        result = compute_composite_score(perfect)
+        assert result["composite_score"] == pytest.approx(100.0)
+
 
 # ===========================================================================
 # Tests — weights sum to 1.0 (config integrity)
