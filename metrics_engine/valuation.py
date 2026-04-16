@@ -139,12 +139,18 @@ def _resolve_growth_rates(
     eps_cagr: float,
     scen_cfg: dict[str, Any],
     terminal_growth: float,
+    max_growth_rate: float | None = None,
 ) -> dict[str, float]:
     """Map *eps_cagr* to bear / base / bull growth rates, flooring negatives.
 
     Edge case — NaN or negative *eps_cagr*:
       bear = 0, base = max(0, eps_cagr),
       bull = max(eps_cagr × bull_multiplier, terminal_growth_rate)
+
+    When *max_growth_rate* is provided, the raw CAGR is capped **before**
+    scenario multipliers are applied.  This prevents absurd intrinsic
+    values when short-window data (e.g. 4-5 years from yfinance) produces
+    extreme CAGRs that compound unrealistically over a 10-year projection.
 
     Parameters
     ----------
@@ -156,6 +162,10 @@ def _resolve_growth_rates(
     terminal_growth:
         Perpetuity growth rate from ``valuation.terminal_growth_rate`` in
         config.  Used as the minimum bull-case growth when CAGR is negative.
+    max_growth_rate:
+        Optional ceiling for the raw CAGR before scenario multipliers are
+        applied.  Read from ``valuation.max_growth_rate`` in config.
+        ``None`` means no cap (backward-compatible default).
 
     Returns
     -------
@@ -184,6 +194,18 @@ def _resolve_growth_rates(
     # Normal case: apply scenario multipliers to historical CAGR.
     # Bear = conservative (half growth), Base = historical, Bull = optimistic (1.3×).
     cagr = float(eps_cagr)
+
+    # Cap extreme CAGRs before multiplying by scenario factors.
+    # Short data windows (4-5 yrs) can produce 60-100%+ CAGR which,
+    # when projected 10 years, yields absurd IVs (e.g. $14M per share).
+    if max_growth_rate is not None and cagr > max_growth_rate:
+        logger.info(
+            "EPS CAGR=%.2f%% exceeds max_growth_rate cap of %.2f%%. "
+            "Capping for IV projection.",
+            cagr * 100, max_growth_rate * 100,
+        )
+        cagr = max_growth_rate
+
     return {
         "bear": cagr * bear_mult,
         "base": cagr * base_mult,
@@ -297,10 +319,16 @@ def compute_intrinsic_value(
     terminal_growth = float(get_threshold("valuation.terminal_growth_rate"))
     scen_cfg: dict[str, Any] = get_threshold("valuation.scenarios")
     fallback_pe = float(get_threshold("valuation.fallback_historical_pe"))
+    try:
+        max_growth_rate: float | None = float(
+            get_threshold("valuation.max_growth_rate"),
+        )
+    except (KeyError, TypeError, ValueError):
+        max_growth_rate = None  # No cap configured — backward compatible
 
     # --- Step 3: Resolve terminal P/E and growth rates per scenario ---
     pe = _resolve_pe_estimates(historical_pe_series, scen_cfg, fallback_pe)
-    gr = _resolve_growth_rates(eps_cagr, scen_cfg, terminal_growth)
+    gr = _resolve_growth_rates(eps_cagr, scen_cfg, terminal_growth, max_growth_rate)
 
     # --- Step 4: Compute each scenario (bear / base / bull) ---
     result: dict[str, Any] = {}

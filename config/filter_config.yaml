@@ -214,6 +214,10 @@ soft_scores:
 valuation:
   projection_years: 10            # DCF projection horizon (years)
   terminal_growth_rate: 0.03      # Perpetuity growth rate after projection period
+  max_growth_rate: 0.25           # Cap on EPS CAGR used in projections (25%).
+                                  # Prevents absurd IVs when short-window data
+                                  # (e.g. 4-5 yrs from yfinance) produces extreme
+                                  # CAGRs that compound unrealistically over 10 yrs.
 
   scenarios:
     bear:
