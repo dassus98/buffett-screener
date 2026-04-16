@@ -55,7 +55,7 @@ from typing import Any
 import jinja2
 import pandas as pd
 
-from data_acquisition.store import read_table
+from data_acquisition.store import get_connection, read_table
 from metrics_engine.growth import compute_eps_cagr
 from screener.filter_config_loader import get_threshold
 from valuation_reports.earnings_yield import assess_yield_attractiveness
@@ -652,10 +652,30 @@ def build_report_context(ticker: str) -> dict[str, Any]:
         valuation.get("bond_yield", float("nan")),
     )
 
-    # --- Step 6: Compute composite score proxy ---
-    #     In the full pipeline, composite_score comes from the screener.
-    #     Here we read it from the shortlist or metrics if available.
+    # --- Step 6: Read composite score from pipeline tables ---
     composite_score = float("nan")
+    try:
+        conn = get_connection()
+        cs_df = conn.execute(
+            "SELECT composite_score FROM composite_scores WHERE ticker = ?",
+            [ticker],
+        ).fetchdf()
+        if not cs_df.empty:
+            composite_score = float(cs_df.iloc[0]["composite_score"])
+    except Exception:
+        pass
+    if math.isnan(composite_score):
+        try:
+            conn = get_connection()
+            ms_df = conn.execute(
+                "SELECT composite_score FROM buffett_metrics_summary "
+                "WHERE ticker = ?",
+                [ticker],
+            ).fetchdf()
+            if not ms_df.empty:
+                composite_score = float(ms_df.iloc[0]["composite_score"])
+        except Exception:
+            pass
 
     # --- Step 7: Generate recommendation ---
     rec = generate_recommendation(
@@ -711,9 +731,9 @@ def build_report_context(ticker: str) -> dict[str, Any]:
     cashflow_tests = _build_cashflow_tests(cf_df)
 
     # --- Step 14: Build annual detail rows ---
-    annual_income = _build_annual_income(inc_df)
+    annual_income = _build_annual_income(inc_df, bs_df)
     annual_balance = _build_annual_balance(bs_df)
-    annual_cashflow = _build_annual_cashflow(cf_df)
+    annual_cashflow = _build_annual_cashflow(cf_df, inc_df)
 
     # --- Step 15: Latest fiscal year ---
     latest_fy = 0
@@ -919,11 +939,24 @@ def build_report_context(ticker: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _build_annual_income(inc_df: pd.DataFrame) -> list[dict]:
+def _build_annual_income(
+    inc_df: pd.DataFrame,
+    bs_df: pd.DataFrame | None = None,
+) -> list[dict]:
     """Build annual income statement detail rows for the template."""
     if inc_df.empty:
         return []
     df = inc_df.sort_values("fiscal_year").copy()
+
+    # Build a year → shareholders_equity lookup from balance sheet
+    equity_by_year: dict[int, float] = {}
+    if bs_df is not None and not bs_df.empty:
+        for _, brow in bs_df.iterrows():
+            fy = int(brow.get("fiscal_year", 0))
+            eq = _safe_float(brow.get("shareholders_equity"))
+            if fy > 0:
+                equity_by_year[fy] = eq
+
     rows = []
     for _, row in df.iterrows():
         revenue = _safe_float(row.get("total_revenue"))
@@ -933,14 +966,17 @@ def _build_annual_income(inc_df: pd.DataFrame) -> list[dict]:
         gm = gross_profit / revenue if revenue > 0 else 0.0
         om = operating_income / revenue if revenue > 0 else 0.0
         nm = net_income / revenue if revenue > 0 else 0.0
+        fy = int(row["fiscal_year"])
+        equity = equity_by_year.get(fy, 0.0)
+        roe = net_income / equity if equity > 0 else 0.0
         rows.append({
-            "fiscal_year": int(row["fiscal_year"]),
+            "fiscal_year": fy,
             "revenue": revenue / 1000,  # convert to $K
             "gross_margin": gm,
             "operating_margin": om,
             "net_margin": nm,
             "eps_diluted": _safe_float(row.get("eps_diluted")),
-            "roe": 0.0,  # requires balance sheet join; set to 0 for now
+            "roe": roe,
         })
     return rows
 
@@ -965,21 +1001,40 @@ def _build_annual_balance(bs_df: pd.DataFrame) -> list[dict]:
     return rows
 
 
-def _build_annual_cashflow(cf_df: pd.DataFrame) -> list[dict]:
+def _build_annual_cashflow(
+    cf_df: pd.DataFrame,
+    inc_df: pd.DataFrame | None = None,
+) -> list[dict]:
     """Build annual cash flow detail rows for the template."""
     if cf_df.empty:
         return []
     df = cf_df.sort_values("fiscal_year").copy()
+
+    # Build a year → net_income lookup from income statement
+    ni_by_year: dict[int, float] = {}
+    if inc_df is not None and not inc_df.empty:
+        for _, irow in inc_df.iterrows():
+            fy = int(irow.get("fiscal_year", 0))
+            ni = _safe_float(irow.get("net_income"))
+            if fy > 0:
+                ni_by_year[fy] = ni
+
     rows = []
     for _, row in df.iterrows():
         da = _safe_float(row.get("depreciation_amortization"))
         capex = _safe_float(row.get("capital_expenditures"))
+        fy = int(row["fiscal_year"])
+        net_income = ni_by_year.get(fy, 0.0)
+        # Owner Earnings = Net Income + D&A + CapEx
+        # (capex is stored as negative per schema convention, so adding
+        # it effectively subtracts the absolute CapEx spend)
+        owner_earnings = net_income + da + capex
         rows.append({
-            "fiscal_year": int(row["fiscal_year"]),
+            "fiscal_year": fy,
             "operating_cash_flow": 0.0,  # Not directly in DuckDB schema
             "capital_expenditures": capex / 1000,
             "free_cash_flow": 0.0,
-            "owner_earnings": 0.0,
+            "owner_earnings": owner_earnings / 1000,
             "depreciation_amortization": da / 1000,
         })
     return rows
@@ -1071,6 +1126,19 @@ def render_summary(
         reverse=True,
     )
 
+    # Build macro context from DuckDB macro_data table (key-value store)
+    macro: dict[str, float] = screener_summary.get("macro", {})
+    if not macro:
+        try:
+            macro_df = read_table("macro_data")
+            for _, mrow in macro_df.iterrows():
+                key = str(mrow.get("key", ""))
+                val = mrow.get("value")
+                if key and val is not None:
+                    macro[key] = float(val)
+        except Exception:
+            pass
+
     ctx: dict[str, Any] = {
         "top_n": len(rows),
         "run_date": datetime.date.today().isoformat(),
@@ -1078,7 +1146,7 @@ def render_summary(
         "after_exclusions": screener_summary.get("after_exclusions", 0),
         "passed_hard_filters": screener_summary.get("passed_hard_filters", 0),
         "shortlist_count": len(rows),
-        "macro": screener_summary.get("macro", {}),
+        "macro": macro,
         "rows": rows,
         "filter_stats": screener_summary.get("filter_stats", {}),
         "sector_summary": sector_summary,

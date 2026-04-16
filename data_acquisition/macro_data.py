@@ -24,14 +24,15 @@ Config dependency map (all from config/filter_config.yaml):
   data_sources.fred.base_url          → _fetch_fred_latest (FRED endpoint URL)
   data_sources.fred.rate_limit_per_min→ fred_limiter (initialised in api_config.py)
   data_sources.fred.series.treasury_10yr → _fetch_all_macro_series (DGS10)
+  data_sources.fred.series.goc_10yr  → _fetch_all_macro_series (IRLTLT01CAM156N)
   data_sources.fred.series.usd_cad   → _fetch_all_macro_series (DEXCAUS)
 
 Downstream consumers:
   store.py               → writes macro_data dict as key-value rows to DuckDB
   metrics_engine/        → reads us_treasury_10yr for F14 (DCF discount rate),
-                            F16 (earnings yield spread)
+                            F16 (earnings yield spread); goc_bond_10yr for TSX
   valuation_reports/     → reads us_treasury_10yr for risk-free rate, usd_cad_rate
-                            for CAD conversion in recommendations
+                            for CAD conversion, goc_bond_10yr for TSX valuations
 
 Key exports
 -----------
@@ -75,6 +76,10 @@ _YF_TREASURY_TICKER: str = "^TNX"
 #: yfinance fallback ticker for CAD/USD rate (USD per 1 CAD).
 _YF_USDCAD_TICKER: str = "CADUSD=X"
 
+#: yfinance fallback ticker for GoC 10-year bond (no direct ticker;
+#: we accept FRED-only and log a warning if unavailable).
+_GOC_YF_FALLBACK: str | None = None  # No reliable yfinance proxy
+
 
 # ---------------------------------------------------------------------------
 # Public functions
@@ -87,6 +92,7 @@ def fetch_macro_data(use_cache: bool = True) -> dict[str, Any]:
 
     - ``us_treasury_10yr``: 10-year US Treasury yield as a **decimal**
       (e.g. 0.0425). Raw FRED percent is divided by 100 on ingest.
+    - ``goc_bond_10yr``: GoC 10-year bond yield as a decimal (FRED only).
     - ``usd_cad_rate``: USD per 1 CAD from FRED ``DEXCAUS`` (e.g. 0.74).
     - ``as_of_date``: ISO 8601 date string when data was fetched.
 
@@ -171,7 +177,7 @@ def _fetch_all_macro_series() -> dict[str, Any]:
     Returns
     -------
     dict
-        Keys: us_treasury_10yr, usd_cad_rate, as_of_date.
+        Keys: us_treasury_10yr, goc_bond_10yr, usd_cad_rate, as_of_date.
     """
     cfg = get_config()
     series_map: dict[str, str] = (
@@ -179,6 +185,7 @@ def _fetch_all_macro_series() -> dict[str, Any]:
     )
     treasury_id = series_map.get("treasury_10yr", "DGS10")
     usd_cad_id = series_map.get("usd_cad", "DEXCAUS")
+    goc_10yr_id = series_map.get("goc_10yr", "IRLTLT01CAM156N")
 
     us_10yr = _fetch_fred_latest(treasury_id)
     if us_10yr is not None and not math.isnan(us_10yr):
@@ -190,8 +197,23 @@ def _fetch_all_macro_series() -> dict[str, Any]:
     if usd_cad is None or math.isnan(usd_cad):
         usd_cad = _fetch_yf_usdcad_fallback()
 
+    # GoC 10-year bond yield (FRED only — no reliable yfinance proxy).
+    # Stored as "goc_bond_10yr" to match downstream consumers
+    # (metrics_engine, valuation_reports, streamlit_app).
+    goc_10yr = _fetch_fred_latest(goc_10yr_id)
+    if goc_10yr is not None and not math.isnan(goc_10yr):
+        goc_10yr = goc_10yr / 100.0  # percent → decimal
+    else:
+        logger.warning(
+            "GoC 10-year bond yield unavailable from FRED (%s). "
+            "TSX valuations will use the 4%% hardcoded fallback.",
+            goc_10yr_id,
+        )
+        goc_10yr = float("nan")
+
     return {
         "us_treasury_10yr": us_10yr if us_10yr is not None else float("nan"),
+        "goc_bond_10yr": goc_10yr,
         "usd_cad_rate": usd_cad if usd_cad is not None else float("nan"),
         "as_of_date": datetime.now(tz=timezone.utc).date().isoformat(),
     }
@@ -379,7 +401,7 @@ def _load_macro_cache(cache_path: pathlib.Path) -> dict[str, Any]:
     with cache_path.open("r") as fh:
         raw: dict[str, Any] = json.load(fh)
     # Restore None (JSON null) → float("nan") for numeric fields.
-    for key in ("us_treasury_10yr", "usd_cad_rate"):
+    for key in ("us_treasury_10yr", "goc_bond_10yr", "usd_cad_rate"):
         if raw.get(key) is None:
             raw[key] = float("nan")
     return raw

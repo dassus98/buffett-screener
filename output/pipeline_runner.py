@@ -504,6 +504,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
             stages_run.append("data_acquisition")
         else:
             logger.info("Stage 1 skipped (--skip-acquisition).")
+            # Read universe size from existing DuckDB data
+            try:
+                from data_acquisition.store import read_table as _read
+                universe_df = _read("universe")
+                total_universe = len(universe_df)
+                pipeline_stats["universe_size"] = total_universe
+            except Exception:
+                pass
 
         # --- Stage 2: Metrics Engine ---
         composite_df = pd.DataFrame()
@@ -520,6 +528,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
             top_n=args.top,
             exchange_filter=args.exchange,
             total_universe=total_universe,
+        )
+        pipeline_stats["tier1_survivors"] = screener_summary.get(
+            "after_tier1", pipeline_stats.get("tier1_survivors", 0),
         )
         pipeline_stats["shortlisted"] = len(shortlist_df)
         stages_run.append("screening")

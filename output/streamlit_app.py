@@ -93,12 +93,19 @@ def _load_table(table_name: str) -> pd.DataFrame:
     pd.DataFrame
         Full table contents (may be empty).
     """
-    from data_acquisition.store import read_table
+    from data_acquisition.store import get_connection
 
     try:
+        from data_acquisition.store import read_table
         return read_table(table_name)
-    except Exception:
-        return pd.DataFrame()
+    except (ValueError, RuntimeError):
+        # Stage-2 tables (composite_scores, buffett_metrics_summary) are
+        # not in _TABLE_DDL.  Fall back to direct DuckDB query.
+        try:
+            conn = get_connection()
+            return conn.execute(f"SELECT * FROM {table_name}").fetchdf()
+        except Exception:
+            return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)

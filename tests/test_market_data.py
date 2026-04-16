@@ -523,7 +523,7 @@ class TestFetchAllMacroSeries:
         mock_usd_fallback: MagicMock,
         mock_tsy_fallback: MagicMock,
     ) -> None:
-        mock_fred.side_effect = [4.25, 0.74]  # DGS10, DEXCAUS
+        mock_fred.side_effect = [4.25, 0.74, 3.80]  # DGS10, DEXCAUS, GoC
         result = _fetch_all_macro_series()
         assert result["us_treasury_10yr"] == pytest.approx(0.0425)
 
@@ -536,7 +536,7 @@ class TestFetchAllMacroSeries:
         mock_usd_fallback: MagicMock,
         mock_tsy_fallback: MagicMock,
     ) -> None:
-        mock_fred.side_effect = [4.25, 0.74]
+        mock_fred.side_effect = [4.25, 0.74, 3.80]  # DGS10, DEXCAUS, GoC
         result = _fetch_all_macro_series()
         assert result["usd_cad_rate"] == pytest.approx(0.74)
 
@@ -561,7 +561,7 @@ class TestFetchAllMacroSeries:
         mock_usd_fallback: MagicMock,
         mock_tsy_fallback: MagicMock,
     ) -> None:
-        mock_fred.side_effect = [4.25, None]  # treasury succeeds, DEXCAUS fails
+        mock_fred.side_effect = [4.25, None, 3.80]  # treasury ok, DEXCAUS fails, GoC ok
         result = _fetch_all_macro_series()
         assert result["usd_cad_rate"] == pytest.approx(0.73)
 
@@ -587,7 +587,7 @@ class TestFetchAllMacroSeries:
         mock_usd_fallback: MagicMock,
         mock_tsy_fallback: MagicMock,
     ) -> None:
-        mock_fred.side_effect = [4.25, 0.74]
+        mock_fred.side_effect = [4.25, 0.74, 3.80]  # DGS10, DEXCAUS, GoC
         result = _fetch_all_macro_series()
         assert isinstance(result["as_of_date"], str)
         assert len(result["as_of_date"]) == 10  # YYYY-MM-DD
@@ -915,11 +915,12 @@ class TestFredConfigDriven:
                     "series": {
                         "treasury_10yr": "CUSTOM_TSY",
                         "usd_cad": "CUSTOM_FX",
+                        "goc_10yr": "CUSTOM_GOC",
                     },
                 },
             },
         }
-        mock_fred.side_effect = [4.25, 0.74]
+        mock_fred.side_effect = [4.25, 0.74, 3.80]  # TSY, FX, GoC
 
         _fetch_all_macro_series()
 
@@ -927,6 +928,7 @@ class TestFredConfigDriven:
         calls = [c[0][0] for c in mock_fred.call_args_list]
         assert calls[0] == "CUSTOM_TSY"
         assert calls[1] == "CUSTOM_FX"
+        assert calls[2] == "CUSTOM_GOC"
 
     @patch("data_acquisition.macro_data._fetch_yf_treasury_fallback")
     @patch("data_acquisition.macro_data._fetch_yf_usdcad_fallback")
@@ -939,15 +941,16 @@ class TestFredConfigDriven:
         mock_usd_fallback: MagicMock,
         mock_tsy_fallback: MagicMock,
     ) -> None:
-        """When config lacks series keys, fall back to DGS10 and DEXCAUS."""
+        """When config lacks series keys, fall back to DGS10, DEXCAUS, IRLTLT01CAM156N."""
         mock_config.return_value = {"data_sources": {"fred": {}}}
-        mock_fred.side_effect = [4.25, 0.74]
+        mock_fred.side_effect = [4.25, 0.74, 3.80]  # TSY, FX, GoC
 
         _fetch_all_macro_series()
 
         calls = [c[0][0] for c in mock_fred.call_args_list]
         assert calls[0] == "DGS10"
         assert calls[1] == "DEXCAUS"
+        assert calls[2] == "IRLTLT01CAM156N"
 
     @patch("data_acquisition.macro_data.resilient_request")
     @patch("data_acquisition.macro_data.get_fred_key", return_value="test_key")

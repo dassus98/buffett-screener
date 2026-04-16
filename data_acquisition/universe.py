@@ -72,6 +72,23 @@ _FMP_SCREENER_LIMIT = 10_000
 #: Not currently in config; could be added as universe.cache_ttl_days.
 _CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
+#: yfinance exchange codes → canonical display names. yfinance returns
+#: identifiers like "NMS" (NASDAQ National Market System), "NGM" (NASDAQ
+#: Global Market), "NCM" (NASDAQ Capital Market), or "NYQ" (NYSE) instead
+#: of the user-friendly exchange name.  Applied in _yf_ticker_to_row.
+_YF_EXCHANGE_NORMALIZE: dict[str, str] = {
+    "NMS": "NASDAQ",
+    "NGM": "NASDAQ",
+    "NCM": "NASDAQ",
+    "NGS": "NASDAQ",
+    "NAS": "NASDAQ",
+    "NYQ": "NYSE",
+    "NYS": "NYSE",
+    "TOR": "TSX",
+    "TSX": "TSX",
+    "AMX": "AMEX",
+}
+
 #: FMP exchange identifiers. Keys are canonical config names; values are the
 #: parameter string sent to the API.
 _EXCHANGE_MAP: dict[str, str] = {
@@ -750,13 +767,8 @@ def _yf_ticker_to_row(
     if mkt_cap < min_cap:
         return None
 
-    exchange = (info.get("exchange") or "").upper()
-    if "NAS" in exchange or "NDQ" in exchange or "NGS" in exchange:
-        exchange = "NASDAQ"
-    elif "NYS" in exchange or "NYQ" in exchange:
-        exchange = "NYSE"
-    elif "TOR" in exchange or "TSX" in exchange:
-        exchange = "TSX"
+    raw_exchange = (info.get("exchange") or "").upper()
+    exchange = _YF_EXCHANGE_NORMALIZE.get(raw_exchange, raw_exchange)
 
     return {
         "ticker": info.get("symbol", ticker),
