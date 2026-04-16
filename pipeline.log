@@ -1,0 +1,321 @@
+13:38:20 [INFO] __main__: Pipeline starting (mode=reports)
+13:38:21 [INFO] __main__: === Stage 1: Data Acquisition ===
+13:38:21 [INFO] data_acquisition: === Data acquisition pipeline starting (use_cache=False) ===
+13:38:21 [INFO] data_acquisition.store: Opened DuckDB connection: data/processed/buffett.duckdb
+13:38:21 [INFO] data_acquisition.store: Initialized 8 DuckDB tables at data/processed/buffett.duckdb.
+13:38:21 [INFO] data_acquisition.universe: Fetching fresh universe from FMP (use_cache=False).
+13:38:21 [INFO] data_acquisition.universe: Fetching universe for exchange=TSX (FMP identifier=TSX), min_cap=$500,000,000
+13:38:21 [ERROR] data_acquisition.api_config: HTTP 429 — all 1 attempts exhausted for https://financialmodelingprep.com/stable/company-screener?apikey=***&marketCapMoreThan=500000000&exchange=TSX&isActivelyTrading=true&limit=10000.
+13:38:21 [ERROR] data_acquisition.universe: Failed to fetch universe for exchange TSX: 429 Client Error: Too Many Requests for url: https://financialmodelingprep.com/stable/company-screener?apikey=RvMnIX9jcBbDYYyyJC9Q7UVdyjv8WajV&marketCapMoreThan=500000000&exchange=TSX&isActivelyTrading=true&limit=10000
+13:38:21 [WARNING] data_acquisition.universe: Exchange TSX returned 0 tickers — skipping remaining exchanges.
+13:38:21 [INFO] data_acquisition.universe: Skipping FMP for exchange NYSE (previous exchange already failed).
+13:38:21 [INFO] data_acquisition.universe: Skipping FMP for exchange NASDAQ (previous exchange already failed).
+13:38:21 [WARNING] data_acquisition.universe: FMP screener returned 0 tickers for all exchanges ['TSX', 'NYSE', 'NASDAQ']. Falling back to Wikipedia + yfinance (no API key required).
+13:38:22 [INFO] data_acquisition.universe: Wikipedia S&P 500: 503 tickers scraped.
+13:38:22 [WARNING] data_acquisition.universe: Failed to scrape TSX from Wikipedia: 'float' object has no attribute 'endswith'
+13:38:22 [INFO] data_acquisition.universe: Wikipedia fallback: enriching 503 tickers via yfinance...
+13:38:34 [INFO] data_acquisition.universe: yfinance enrichment: 50/503 tickers processed (49 accepted so far)...
+13:38:46 [INFO] data_acquisition.universe: yfinance enrichment: 100/503 tickers processed (97 accepted so far)...
+13:38:58 [INFO] data_acquisition.universe: yfinance enrichment: 150/503 tickers processed (147 accepted so far)...
+13:39:10 [INFO] data_acquisition.universe: yfinance enrichment: 200/503 tickers processed (197 accepted so far)...
+13:39:22 [INFO] data_acquisition.universe: yfinance enrichment: 250/503 tickers processed (247 accepted so far)...
+13:39:36 [INFO] data_acquisition.universe: yfinance enrichment: 300/503 tickers processed (297 accepted so far)...
+13:39:48 [INFO] data_acquisition.universe: yfinance enrichment: 350/503 tickers processed (347 accepted so far)...
+13:39:59 [INFO] data_acquisition.universe: yfinance enrichment: 400/503 tickers processed (397 accepted so far)...
+13:40:16 [INFO] data_acquisition.universe: yfinance enrichment: 450/503 tickers processed (447 accepted so far)...
+13:40:27 [INFO] data_acquisition.universe: yfinance enrichment: 500/503 tickers processed (497 accepted so far)...
+13:40:28 [INFO] data_acquisition.universe: yfinance enrichment: 503/503 tickers processed (500 accepted so far)...
+13:40:28 [INFO] data_acquisition.universe: yfinance enrichment: 2 tickers skipped (below min_cap or info unavailable).
+13:40:28 [INFO] data_acquisition.universe: Wikipedia fallback: 501 tickers after yfinance enrichment and min_cap filter ($500,000,000).
+13:40:28 [INFO] data_acquisition.universe: Raw universe: 501 tickers before filtering.
+13:40:28 [INFO] data_acquisition.universe: filter_universe: removing 69 tickers by sector exclusion ['financial services'].
+13:40:28 [INFO] data_acquisition.universe: filter_universe: removing 29 tickers matching industry keyword 'REIT'.
+13:40:28 [INFO] data_acquisition.universe: filter_universe: 501 → 403 tickers (98 removed by exclusions).
+13:40:28 [INFO] data_acquisition.universe: Filtered universe: 403 tickers after exclusions.
+13:40:28 [INFO] data_acquisition.universe: Universe cached to /home/dchit/projects/buffett-screener/data/raw/universe.parquet (403 rows).
+13:40:29 [INFO] data_acquisition.store: Wrote 403 rows to 'universe' (mode=replace).
+13:40:29 [INFO] data_acquisition: Universe: 403 tickers fetched and stored.
+13:40:29 [INFO] data_acquisition.financials: fetch_all_financials: 403 tickers × 3 statements = 1209 FMP requests. Estimated time at 300 req/min: ~5 minute(s).
+13:40:29 [ERROR] data_acquisition.api_config: HTTP 429 — all 1 attempts exhausted for https://financialmodelingprep.com/stable/income-statement?apikey=***&symbol=MMM&period=annual&limit=10.
+13:40:29 [WARNING] data_acquisition.financials: Failed to fetch income_statement for MMM: 429 Client Error: Too Many Requests for url: https://financialmodelingprep.com/stable/income-statement?apikey=RvMnIX9jcBbDYYyyJC9Q7UVdyjv8WajV&symbol=MMM&period=annual&limit=10
+13:40:29 [ERROR] data_acquisition.api_config: HTTP 429 — all 1 attempts exhausted for https://financialmodelingprep.com/stable/balance-sheet-statement?apikey=***&symbol=MMM&period=annual&limit=10.
+13:40:29 [WARNING] data_acquisition.financials: Failed to fetch balance_sheet for MMM: 429 Client Error: Too Many Requests for url: https://financialmodelingprep.com/stable/balance-sheet-statement?apikey=RvMnIX9jcBbDYYyyJC9Q7UVdyjv8WajV&symbol=MMM&period=annual&limit=10
+13:40:29 [ERROR] data_acquisition.api_config: HTTP 429 — all 1 attempts exhausted for https://financialmodelingprep.com/stable/cash-flow-statement?apikey=***&symbol=MMM&period=annual&limit=10.
+13:40:29 [WARNING] data_acquisition.financials: Failed to fetch cash_flow for MMM: 429 Client Error: Too Many Requests for url: https://financialmodelingprep.com/stable/cash-flow-statement?apikey=RvMnIX9jcBbDYYyyJC9Q7UVdyjv8WajV&symbol=MMM&period=annual&limit=10
+13:40:29 [INFO] data_acquisition.financials: FMP returned no data for MMM (1 consecutive). Trying yfinance fallback...
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:31 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:31 [ERROR] data_acquisition.api_config: HTTP 429 — all 1 attempts exhausted for https://financialmodelingprep.com/stable/income-statement?apikey=***&symbol=AOS&period=annual&limit=10.
+13:40:31 [WARNING] data_acquisition.financials: Failed to fetch income_statement for AOS: 429 Client Error: Too Many Requests for url: https://financialmodelingprep.com/stable/income-statement?apikey=RvMnIX9jcBbDYYyyJC9Q7UVdyjv8WajV&symbol=AOS&period=annual&limit=10
+13:40:31 [ERROR] data_acquisition.api_config: HTTP 429 — all 1 attempts exhausted for https://financialmodelingprep.com/stable/balance-sheet-statement?apikey=***&symbol=AOS&period=annual&limit=10.
+13:40:31 [WARNING] data_acquisition.financials: Failed to fetch balance_sheet for AOS: 429 Client Error: Too Many Requests for url: https://financialmodelingprep.com/stable/balance-sheet-statement?apikey=RvMnIX9jcBbDYYyyJC9Q7UVdyjv8WajV&symbol=AOS&period=annual&limit=10
+13:40:32 [ERROR] data_acquisition.api_config: HTTP 429 — all 1 attempts exhausted for https://financialmodelingprep.com/stable/cash-flow-statement?apikey=***&symbol=AOS&period=annual&limit=10.
+13:40:32 [WARNING] data_acquisition.financials: Failed to fetch cash_flow for AOS: 429 Client Error: Too Many Requests for url: https://financialmodelingprep.com/stable/cash-flow-statement?apikey=RvMnIX9jcBbDYYyyJC9Q7UVdyjv8WajV&symbol=AOS&period=annual&limit=10
+13:40:32 [INFO] data_acquisition.financials: FMP returned no data for AOS (2 consecutive). Trying yfinance fallback...
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:33 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:33 [ERROR] data_acquisition.api_config: HTTP 429 — all 1 attempts exhausted for https://financialmodelingprep.com/stable/income-statement?apikey=***&symbol=ABT&period=annual&limit=10.
+13:40:33 [WARNING] data_acquisition.financials: Failed to fetch income_statement for ABT: 429 Client Error: Too Many Requests for url: https://financialmodelingprep.com/stable/income-statement?apikey=RvMnIX9jcBbDYYyyJC9Q7UVdyjv8WajV&symbol=ABT&period=annual&limit=10
+13:40:33 [ERROR] data_acquisition.api_config: HTTP 429 — all 1 attempts exhausted for https://financialmodelingprep.com/stable/balance-sheet-statement?apikey=***&symbol=ABT&period=annual&limit=10.
+13:40:33 [WARNING] data_acquisition.financials: Failed to fetch balance_sheet for ABT: 429 Client Error: Too Many Requests for url: https://financialmodelingprep.com/stable/balance-sheet-statement?apikey=RvMnIX9jcBbDYYyyJC9Q7UVdyjv8WajV&symbol=ABT&period=annual&limit=10
+13:40:33 [ERROR] data_acquisition.api_config: HTTP 429 — all 1 attempts exhausted for https://financialmodelingprep.com/stable/cash-flow-statement?apikey=***&symbol=ABT&period=annual&limit=10.
+13:40:33 [WARNING] data_acquisition.financials: Failed to fetch cash_flow for ABT: 429 Client Error: Too Many Requests for url: https://financialmodelingprep.com/stable/cash-flow-statement?apikey=RvMnIX9jcBbDYYyyJC9Q7UVdyjv8WajV&symbol=ABT&period=annual&limit=10
+13:40:33 [INFO] data_acquisition.financials: FMP returned no data for ABT (3 consecutive). Trying yfinance fallback...
+13:40:35 [WARNING] data_acquisition.financials: FMP failed for 3 consecutive tickers — switching to yfinance for the remaining 400 tickers.
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:35 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=net_income | ideal=netIncome | used=Net Income | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=total_revenue | ideal=totalRevenue | used=Total Revenue | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=gross_profit | ideal=grossProfit | used=Gross Profit | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=sga | ideal=sellingGeneralAndAdministrativeExpenses | used=Selling General And Administration | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=operating_income | ideal=operatingIncome | used=Operating Income | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=interest_expense | ideal=interestExpense | used=Interest Expense | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=eps_diluted | ideal=epsdiluted | used=Diluted EPS | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shares_outstanding_diluted | ideal=weightedAverageSharesDiluted | used=Diluted Average Shares | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=long_term_debt | ideal=longTermDebt | used=Long Term Debt | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=shareholders_equity | ideal=totalStockholdersEquity | used=Stockholders Equity | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=treasury_stock | ideal=treasuryStock | used=Treasury Stock | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=depreciation_amortization | ideal=depreciationAndAmortization | used=Depreciation And Amortization | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=capital_expenditures | ideal=capitalExpenditure | used=Capital Expenditure | confidence=High
+13:40:37 [WARNING] data_acquisition.schema: Line-item substitution: buffett_name=working_capital_change | ideal=changeInWorkingCapital | used=Change In Working Capital | confidence=Medium

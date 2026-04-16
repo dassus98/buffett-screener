@@ -14,10 +14,12 @@ import pandas as pd
 import pytest
 
 from data_acquisition.financials import (
+    _MAX_CONSECUTIVE_FMP_FAILURES,
     _apply_value_conventions,
     _empty_normalised_df,
     _ensure_canonical_columns,
     _extract_fiscal_year,
+    _fetch_statements_yfinance,
     _resolve_fmp_ticker,
     fetch_all_financials,
     fetch_financial_statements,
@@ -554,14 +556,20 @@ class TestFetchAllFinancialsAggregation:
 class TestFetchAllFinancialsProgress:
     """Progress logging fires at correct intervals."""
 
+    @patch("data_acquisition.financials._fetch_statements_yfinance")
     @patch("data_acquisition.financials._log_eta")
     @patch("data_acquisition.financials.fetch_financial_statements")
     def test_progress_logged_at_batch_boundaries(
-        self, mock_fetch, mock_eta, caplog
+        self, mock_fetch, mock_eta, mock_yf_fetch, caplog
     ) -> None:
         import logging
 
         mock_fetch.return_value = {
+            "income_statement": None,
+            "balance_sheet": None,
+            "cash_flow": None,
+        }
+        mock_yf_fetch.return_value = {
             "income_statement": None,
             "balance_sheet": None,
             "cash_flow": None,
@@ -749,13 +757,19 @@ class TestFetchFinancialStatementsConfigLimit:
 class TestFetchAllFinancialsTsxSuffix:
     """TSX tickers without '.TO' suffix should be pre-suffixed."""
 
+    @patch("data_acquisition.financials._fetch_statements_yfinance")
     @patch("data_acquisition.financials._log_eta")
     @patch("data_acquisition.financials.fetch_financial_statements")
     def test_tsx_ticker_gets_dot_to_suffix(
-        self, mock_fetch, mock_eta
+        self, mock_fetch, mock_eta, mock_yf_fetch
     ) -> None:
         """A TSX ticker 'SHOP' should become 'SHOP.TO' before API call."""
         mock_fetch.return_value = {
+            "income_statement": None,
+            "balance_sheet": None,
+            "cash_flow": None,
+        }
+        mock_yf_fetch.return_value = {
             "income_statement": None,
             "balance_sheet": None,
             "cash_flow": None,
@@ -770,13 +784,19 @@ class TestFetchAllFinancialsTsxSuffix:
         # fetch_financial_statements must have been called with 'SHOP.TO'.
         mock_fetch.assert_called_once_with("SHOP.TO")
 
+    @patch("data_acquisition.financials._fetch_statements_yfinance")
     @patch("data_acquisition.financials._log_eta")
     @patch("data_acquisition.financials.fetch_financial_statements")
     def test_tsx_ticker_already_suffixed_not_doubled(
-        self, mock_fetch, mock_eta
+        self, mock_fetch, mock_eta, mock_yf_fetch
     ) -> None:
         """A TSX ticker 'SHOP.TO' should NOT become 'SHOP.TO.TO'."""
         mock_fetch.return_value = {
+            "income_statement": None,
+            "balance_sheet": None,
+            "cash_flow": None,
+        }
+        mock_yf_fetch.return_value = {
             "income_statement": None,
             "balance_sheet": None,
             "cash_flow": None,
@@ -789,13 +809,19 @@ class TestFetchAllFinancialsTsxSuffix:
 
         mock_fetch.assert_called_once_with("SHOP.TO")
 
+    @patch("data_acquisition.financials._fetch_statements_yfinance")
     @patch("data_acquisition.financials._log_eta")
     @patch("data_acquisition.financials.fetch_financial_statements")
     def test_us_ticker_not_suffixed(
-        self, mock_fetch, mock_eta
+        self, mock_fetch, mock_eta, mock_yf_fetch
     ) -> None:
         """A NYSE ticker must not receive any suffix."""
         mock_fetch.return_value = {
+            "income_statement": None,
+            "balance_sheet": None,
+            "cash_flow": None,
+        }
+        mock_yf_fetch.return_value = {
             "income_statement": None,
             "balance_sheet": None,
             "cash_flow": None,
@@ -808,13 +834,19 @@ class TestFetchAllFinancialsTsxSuffix:
 
         mock_fetch.assert_called_once_with("AAPL")
 
+    @patch("data_acquisition.financials._fetch_statements_yfinance")
     @patch("data_acquisition.financials._log_eta")
     @patch("data_acquisition.financials.fetch_financial_statements")
     def test_mixed_exchanges_only_tsx_suffixed(
-        self, mock_fetch, mock_eta
+        self, mock_fetch, mock_eta, mock_yf_fetch
     ) -> None:
         """Only TSX tickers should be suffixed; NYSE tickers left alone."""
         mock_fetch.return_value = {
+            "income_statement": None,
+            "balance_sheet": None,
+            "cash_flow": None,
+        }
+        mock_yf_fetch.return_value = {
             "income_statement": None,
             "balance_sheet": None,
             "cash_flow": None,
@@ -831,3 +863,301 @@ class TestFetchAllFinancialsTsxSuffix:
         assert "MSFT" in called_tickers
         # Ensure SHOP (without .TO) was NOT called.
         assert "SHOP" not in called_tickers
+
+
+# ---------------------------------------------------------------------------
+# _fetch_statements_yfinance tests
+# ---------------------------------------------------------------------------
+
+def _make_yf_financials(years: list[int]) -> pd.DataFrame:
+    """Build a mock yfinance .financials DataFrame (fields as index, dates as cols)."""
+    cols = {pd.Timestamp(f"{y}-09-30"): {} for y in years}
+    for ts in cols:
+        cols[ts] = {
+            "Net Income": 100_000_000_000,
+            "Total Revenue": 400_000_000_000,
+            "Gross Profit": 170_000_000_000,
+            "Operating Income": 115_000_000_000,
+            "Interest Expense": 3_000_000_000,
+            "Diluted EPS": 6.13,
+            "Diluted Average Shares": 15_812_547_000,
+            "Selling General And Administration": 24_000_000_000,
+        }
+    return pd.DataFrame(cols)
+
+
+def _make_yf_balance_sheet(years: list[int]) -> pd.DataFrame:
+    """Build a mock yfinance .balance_sheet DataFrame."""
+    cols = {pd.Timestamp(f"{y}-09-30"): {} for y in years}
+    for ts in cols:
+        cols[ts] = {
+            "Long Term Debt": 110_000_000_000,
+            "Stockholders Equity": 62_000_000_000,
+            "Treasury Stock": -70_000_000_000,
+        }
+    return pd.DataFrame(cols)
+
+
+def _make_yf_cashflow(years: list[int]) -> pd.DataFrame:
+    """Build a mock yfinance .cashflow DataFrame."""
+    cols = {pd.Timestamp(f"{y}-09-30"): {} for y in years}
+    for ts in cols:
+        cols[ts] = {
+            "Depreciation And Amortization": 12_000_000_000,
+            "Capital Expenditure": -11_000_000_000,
+            "Change In Working Capital": -5_000_000_000,
+        }
+    return pd.DataFrame(cols)
+
+
+class TestFetchStatementsYfinance:
+    """Tests for the yfinance financial statement fallback."""
+
+    @patch("yfinance.Ticker")
+    def test_returns_dict_with_three_keys(self, mock_ticker_cls) -> None:
+        mock_t = MagicMock()
+        mock_ticker_cls.return_value = mock_t
+        mock_t.financials = _make_yf_financials([2023])
+        mock_t.balance_sheet = _make_yf_balance_sheet([2023])
+        mock_t.cashflow = _make_yf_cashflow([2023])
+
+        result = _fetch_statements_yfinance("AAPL")
+        assert set(result.keys()) == {"income_statement", "balance_sheet", "cash_flow"}
+
+    @patch("yfinance.Ticker")
+    def test_transposed_dataframe_has_field_columns(self, mock_ticker_cls) -> None:
+        """yfinance data is transposed so field names become columns."""
+        mock_t = MagicMock()
+        mock_ticker_cls.return_value = mock_t
+        mock_t.financials = _make_yf_financials([2022, 2023])
+        mock_t.balance_sheet = _make_yf_balance_sheet([2022, 2023])
+        mock_t.cashflow = _make_yf_cashflow([2022, 2023])
+
+        result = _fetch_statements_yfinance("AAPL")
+        income_df = result["income_statement"]
+        assert "Net Income" in income_df.columns
+        assert "Total Revenue" in income_df.columns
+        assert len(income_df) == 2  # Two years of data
+
+    @patch("yfinance.Ticker")
+    def test_calendar_year_column_added(self, mock_ticker_cls) -> None:
+        mock_t = MagicMock()
+        mock_ticker_cls.return_value = mock_t
+        mock_t.financials = _make_yf_financials([2023])
+        mock_t.balance_sheet = _make_yf_balance_sheet([2023])
+        mock_t.cashflow = _make_yf_cashflow([2023])
+
+        result = _fetch_statements_yfinance("AAPL")
+        income_df = result["income_statement"]
+        assert "calendarYear" in income_df.columns
+        assert income_df.iloc[0]["calendarYear"] == "2023"
+
+    @patch("yfinance.Ticker")
+    def test_date_column_added(self, mock_ticker_cls) -> None:
+        mock_t = MagicMock()
+        mock_ticker_cls.return_value = mock_t
+        mock_t.financials = _make_yf_financials([2023])
+        mock_t.balance_sheet = _make_yf_balance_sheet([2023])
+        mock_t.cashflow = _make_yf_cashflow([2023])
+
+        result = _fetch_statements_yfinance("AAPL")
+        income_df = result["income_statement"]
+        assert "date" in income_df.columns
+        assert income_df.iloc[0]["date"] == "2023-09-30"
+
+    @patch("yfinance.Ticker")
+    def test_empty_statement_returns_none(self, mock_ticker_cls) -> None:
+        mock_t = MagicMock()
+        mock_ticker_cls.return_value = mock_t
+        mock_t.financials = pd.DataFrame()  # empty
+        mock_t.balance_sheet = _make_yf_balance_sheet([2023])
+        mock_t.cashflow = _make_yf_cashflow([2023])
+
+        result = _fetch_statements_yfinance("AAPL")
+        assert result["income_statement"] is None
+        assert result["balance_sheet"] is not None
+        assert result["cash_flow"] is not None
+
+    @patch("yfinance.Ticker")
+    def test_ticker_construction_failure_returns_all_none(self, mock_ticker_cls) -> None:
+        mock_ticker_cls.side_effect = Exception("yfinance unavailable")
+        result = _fetch_statements_yfinance("AAPL")
+        assert all(v is None for v in result.values())
+
+    @patch("yfinance.Ticker")
+    def test_normalize_statement_handles_yfinance_data(self, mock_ticker_cls) -> None:
+        """End-to-end: yfinance data can flow through normalize_statement."""
+        mock_t = MagicMock()
+        mock_ticker_cls.return_value = mock_t
+        mock_t.financials = _make_yf_financials([2023])
+        mock_t.balance_sheet = _make_yf_balance_sheet([2023])
+        mock_t.cashflow = _make_yf_cashflow([2023])
+
+        stmt_dfs = _fetch_statements_yfinance("AAPL")
+
+        # Income statement should normalise via yfinance substitute fields
+        norm_df, subs = normalize_statement(
+            stmt_dfs["income_statement"], "income_statement", ticker="AAPL"
+        )
+        assert not norm_df.empty
+        assert norm_df.iloc[0]["fiscal_year"] == 2023
+        # net_income resolved from "Net Income" substitute (÷1000)
+        assert norm_df.iloc[0]["net_income"] == pytest.approx(100_000_000.0)
+
+    @patch("yfinance.Ticker")
+    def test_cashflow_capex_sign_preserved(self, mock_ticker_cls) -> None:
+        """CapEx from yfinance (already negative) should stay negative."""
+        mock_t = MagicMock()
+        mock_ticker_cls.return_value = mock_t
+        mock_t.financials = _make_yf_financials([2023])
+        mock_t.balance_sheet = _make_yf_balance_sheet([2023])
+        mock_t.cashflow = _make_yf_cashflow([2023])
+
+        stmt_dfs = _fetch_statements_yfinance("AAPL")
+        norm_df, _ = normalize_statement(
+            stmt_dfs["cash_flow"], "cash_flow", ticker="AAPL"
+        )
+        assert norm_df.iloc[0]["capital_expenditures"] < 0
+
+
+# ---------------------------------------------------------------------------
+# fetch_all_financials — yfinance fallback logic tests
+# ---------------------------------------------------------------------------
+
+class TestFetchAllFinancialsYfinanceFallback:
+    """Tests for the automatic FMP → yfinance fallback in fetch_all_financials."""
+
+    _ALL_NONE = {
+        "income_statement": None,
+        "balance_sheet": None,
+        "cash_flow": None,
+    }
+
+    @patch("data_acquisition.financials._fetch_statements_yfinance")
+    @patch("data_acquisition.financials._log_eta")
+    @patch("data_acquisition.financials.fetch_financial_statements")
+    def test_yfinance_called_when_fmp_returns_all_none(
+        self, mock_fmp, mock_eta, mock_yf
+    ) -> None:
+        """When FMP returns all-None, yfinance should be tried for that ticker."""
+        mock_fmp.return_value = self._ALL_NONE
+        mock_yf.return_value = self._ALL_NONE
+        universe = _make_universe_df(["AAPL"])
+
+        fetch_all_financials(universe, batch_size=10)
+
+        mock_fmp.assert_called_once()
+        mock_yf.assert_called_once_with("AAPL")
+
+    @patch("data_acquisition.financials._fetch_statements_yfinance")
+    @patch("data_acquisition.financials._log_eta")
+    @patch("data_acquisition.financials.fetch_financial_statements")
+    def test_yfinance_not_called_when_fmp_succeeds(
+        self, mock_fmp, mock_eta, mock_yf
+    ) -> None:
+        """When FMP returns data, yfinance should NOT be called."""
+        mock_fmp.return_value = {
+            "income_statement": pd.DataFrame([_make_fmp_income_row()]),
+            "balance_sheet": pd.DataFrame([_make_fmp_balance_row()]),
+            "cash_flow": pd.DataFrame([_make_fmp_cashflow_row()]),
+        }
+        universe = _make_universe_df(["AAPL"])
+
+        fetch_all_financials(universe, batch_size=10)
+
+        mock_fmp.assert_called_once()
+        mock_yf.assert_not_called()
+
+    @patch("data_acquisition.financials._fetch_statements_yfinance")
+    @patch("data_acquisition.financials._log_eta")
+    @patch("data_acquisition.financials.fetch_financial_statements")
+    def test_switches_to_yfinance_only_after_consecutive_failures(
+        self, mock_fmp, mock_eta, mock_yf
+    ) -> None:
+        """After _MAX_CONSECUTIVE_FMP_FAILURES all-None results, FMP should be
+        skipped entirely for remaining tickers."""
+        mock_fmp.return_value = self._ALL_NONE
+        mock_yf.return_value = self._ALL_NONE
+
+        # Need enough tickers to exceed the threshold
+        n = _MAX_CONSECUTIVE_FMP_FAILURES + 2
+        tickers = [f"T{i}" for i in range(n)]
+        universe = _make_universe_df(tickers)
+
+        fetch_all_financials(universe, batch_size=100)
+
+        # FMP should have been called for the first threshold tickers,
+        # then skipped for the rest.
+        assert mock_fmp.call_count == _MAX_CONSECUTIVE_FMP_FAILURES
+        # yfinance should have been called for ALL tickers
+        # (as fallback for the first N, and directly for the rest).
+        assert mock_yf.call_count == n
+
+    @patch("data_acquisition.financials._fetch_statements_yfinance")
+    @patch("data_acquisition.financials._log_eta")
+    @patch("data_acquisition.financials.fetch_financial_statements")
+    def test_fmp_success_resets_failure_counter(
+        self, mock_fmp, mock_eta, mock_yf
+    ) -> None:
+        """An FMP success should reset the consecutive failure counter."""
+        good_response = {
+            "income_statement": pd.DataFrame([_make_fmp_income_row("T1")]),
+            "balance_sheet": pd.DataFrame([_make_fmp_balance_row("T1")]),
+            "cash_flow": pd.DataFrame([_make_fmp_cashflow_row("T1")]),
+        }
+        # 2 failures, then 1 success, then 2 more failures.
+        # Total FMP failures never reach threshold of 3 consecutively.
+        mock_fmp.side_effect = [
+            self._ALL_NONE,      # T0: fail → try yfinance
+            self._ALL_NONE,      # T1: fail → try yfinance
+            good_response,       # T2: success → reset counter
+            self._ALL_NONE,      # T3: fail → try yfinance (counter=1)
+            self._ALL_NONE,      # T4: fail → try yfinance (counter=2)
+        ]
+        mock_yf.return_value = self._ALL_NONE
+        universe = _make_universe_df([f"T{i}" for i in range(5)])
+
+        fetch_all_financials(universe, batch_size=100)
+
+        # All 5 tickers should have been tried via FMP
+        # (never hit threshold of 3 consecutive).
+        assert mock_fmp.call_count == 5
+        # yfinance fallback called for the 4 failures, not for T2 (success).
+        assert mock_yf.call_count == 4
+
+    @patch("data_acquisition.financials._fetch_statements_yfinance")
+    @patch("data_acquisition.financials._log_eta")
+    @patch("data_acquisition.financials.fetch_financial_statements")
+    def test_yfinance_data_normalised_and_collected(
+        self, mock_fmp, mock_eta, mock_yf
+    ) -> None:
+        """yfinance fallback data should be normalised and included in output."""
+        mock_fmp.return_value = self._ALL_NONE
+        # Return real yfinance-style data
+        mock_yf.return_value = {
+            "income_statement": _make_yf_financials([2023]).T.assign(
+                calendarYear="2023", date="2023-09-30"
+            ).reset_index(drop=True),
+            "balance_sheet": None,
+            "cash_flow": None,
+        }
+        # Ensure column names match what yfinance transpose produces
+        yf_income = _make_yf_financials([2023]).T.copy()
+        dates = pd.to_datetime(yf_income.index)
+        yf_income = yf_income.reset_index(drop=True)
+        yf_income["calendarYear"] = dates.year.astype(str)
+        yf_income["date"] = dates.strftime("%Y-%m-%d")
+        mock_yf.return_value = {
+            "income_statement": yf_income,
+            "balance_sheet": None,
+            "cash_flow": None,
+        }
+
+        universe = _make_universe_df(["AAPL"])
+        result_dfs, subs = fetch_all_financials(universe, batch_size=10)
+
+        # Income statement should have data from yfinance
+        income = result_dfs["income_statement"]
+        assert len(income) == 1
+        assert income.iloc[0]["ticker"] == "AAPL"
+        assert income.iloc[0]["fiscal_year"] == 2023

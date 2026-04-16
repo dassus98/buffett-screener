@@ -128,8 +128,16 @@ def fetch_universe() -> pd.DataFrame:
     min_cap: int = int(cfg["universe"]["min_market_cap_usd"])
 
     all_frames: list[pd.DataFrame] = []
+    fmp_failed = False  # Set True on first exchange failure to skip remaining
 
     for exchange in exchanges:
+        if fmp_failed:
+            logger.info(
+                "Skipping FMP for exchange %s (previous exchange already failed).",
+                exchange,
+            )
+            continue
+
         fmp_exchange = _EXCHANGE_MAP.get(exchange.upper(), exchange.upper())
         logger.info(
             "Fetching universe for exchange=%s (FMP identifier=%s), min_cap=$%s",
@@ -138,14 +146,17 @@ def fetch_universe() -> pd.DataFrame:
             f"{min_cap:,}",
         )
 
-        rows = _fetch_single_exchange(fmp_exchange, min_cap)
+        # Use max_retries=0 (single attempt) to fail fast if FMP is
+        # rate-limited or unavailable — avoids multi-second backoff waits
+        # before the Wikipedia + yfinance fallback kicks in.
+        rows = _fetch_single_exchange(fmp_exchange, min_cap, max_retries=0)
 
         if len(rows) == 0:
             logger.warning(
-                "Exchange %s returned 0 tickers. "
-                "Verify FMP coverage for this exchange on your API tier.",
+                "Exchange %s returned 0 tickers — skipping remaining exchanges.",
                 exchange,
             )
+            fmp_failed = True
             continue
 
         if len(rows) >= _FMP_SCREENER_LIMIT:
@@ -167,7 +178,7 @@ def fetch_universe() -> pd.DataFrame:
     if not all_frames:
         logger.warning(
             "FMP screener returned 0 tickers for all exchanges %s. "
-            "Attempting Wikipedia + FMP profile fallback.",
+            "Falling back to Wikipedia + yfinance (no API key required).",
             exchanges,
         )
         fallback = _fetch_universe_via_wikipedia(exchanges, min_cap)
@@ -336,7 +347,11 @@ def get_universe(use_cache: bool = True) -> pd.DataFrame:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _fetch_single_exchange(fmp_exchange: str, min_cap: int) -> list[dict[str, Any]]:
+def _fetch_single_exchange(
+    fmp_exchange: str,
+    min_cap: int,
+    max_retries: int | None = None,
+) -> list[dict[str, Any]]:
     """Call FMP /company-screener for one exchange and return raw rows.
 
     Uses the FMP ``/stable/company-screener`` endpoint (the replacement
@@ -348,6 +363,9 @@ def _fetch_single_exchange(fmp_exchange: str, min_cap: int) -> list[dict[str, An
         The exchange identifier string to pass to FMP (e.g. ``"NYSE"``).
     min_cap:
         Minimum market cap in full USD dollars.
+    max_retries:
+        Override the default retry count. Pass ``0`` for a single attempt
+        (fail fast). ``None`` uses the config default.
 
     Returns
     -------
@@ -363,7 +381,10 @@ def _fetch_single_exchange(fmp_exchange: str, min_cap: int) -> list[dict[str, An
         limit=_FMP_SCREENER_LIMIT,
     )
     try:
-        result = resilient_request(url, params=params, rate_limiter=fmp_limiter)
+        kwargs: dict[str, Any] = {"params": params, "rate_limiter": fmp_limiter}
+        if max_retries is not None:
+            kwargs["max_retries"] = max_retries
+        result = resilient_request(url, **kwargs)
     except Exception as exc:
         logger.error(
             "Failed to fetch universe for exchange %s: %s", fmp_exchange, exc
@@ -584,41 +605,16 @@ def _scrape_tsx_tickers() -> list[str]:
         return []
 
 
-def _fetch_profile(ticker: str) -> dict[str, Any] | None:
-    """Fetch a single ticker profile from FMP ``/stable/profile``.
-
-    Parameters
-    ----------
-    ticker:
-        Ticker symbol (e.g. ``"AAPL"`` or ``"RY.TO"``).
-
-    Returns
-    -------
-    dict or None
-        Profile dict on success, ``None`` on failure.
-    """
-    url, params = build_fmp_url(
-        "/profile", use_stable=True, symbol=ticker,
-    )
-    try:
-        result = resilient_request(url, params=params, rate_limiter=fmp_limiter)
-    except Exception:
-        return None
-    if isinstance(result, list) and result:
-        return result[0]
-    return None
-
-
 def _fetch_universe_via_wikipedia(
     exchanges: list[str],
     min_cap: int,
 ) -> pd.DataFrame:
-    """Build the universe from Wikipedia index lists + FMP profile data.
+    """Build the universe from Wikipedia index lists + yfinance profile data.
 
     Fallback used when the FMP screener endpoint is unavailable (e.g.
-    free-tier plans). Scrapes S&P 500 and S&P/TSX Composite constituent
+    free-tier plans).  Scrapes S&P 500 and S&P/TSX Composite constituent
     lists from Wikipedia, then enriches each ticker with market cap,
-    sector, and industry via the FMP ``/stable/profile`` endpoint.
+    sector, and industry via **yfinance** (no API key required).
 
     Parameters
     ----------
@@ -633,41 +629,29 @@ def _fetch_universe_via_wikipedia(
     pd.DataFrame
         Universe DataFrame with columns matching ``UNIVERSE_COLUMNS``.
     """
-    tickers_by_exchange: dict[str, list[str]] = {}
+    all_tickers: list[str] = []
 
-    # Scrape US indices
     us_exchanges = {"NYSE", "NASDAQ", "AMEX"}
-    if us_exchanges & set(e.upper() for e in exchanges):
-        sp500 = _scrape_sp500_tickers()
-        if sp500:
-            tickers_by_exchange["US"] = sp500
+    if us_exchanges & {e.upper() for e in exchanges}:
+        all_tickers.extend(_scrape_sp500_tickers())
 
-    # Scrape TSX
     if "TSX" in (e.upper() for e in exchanges):
-        tsx = _scrape_tsx_tickers()
-        if tsx:
-            tickers_by_exchange["TSX"] = tsx
-
-    all_tickers = []
-    for group_tickers in tickers_by_exchange.values():
-        all_tickers.extend(group_tickers)
+        all_tickers.extend(_scrape_tsx_tickers())
 
     if not all_tickers:
         logger.error("Wikipedia fallback: no tickers scraped.")
         return _empty_universe_df()
 
     logger.info(
-        "Wikipedia fallback: enriching %d tickers via FMP profile...",
+        "Wikipedia fallback: enriching %d tickers via yfinance...",
         len(all_tickers),
     )
 
-    rows = _enrich_tickers_via_profile(all_tickers, min_cap)
-
+    rows = _enrich_tickers_via_yfinance(all_tickers, min_cap)
     if not rows:
         return _empty_universe_df()
 
     df = pd.DataFrame(rows)
-    # Ensure all columns exist
     for col in UNIVERSE_COLUMNS:
         if col not in df.columns:
             df[col] = None
@@ -675,7 +659,7 @@ def _fetch_universe_via_wikipedia(
     df = df.drop_duplicates(subset=["ticker"], keep="first")
 
     logger.info(
-        "Wikipedia fallback: %d tickers after profile enrichment "
+        "Wikipedia fallback: %d tickers after yfinance enrichment "
         "and min_cap filter ($%s).",
         len(df),
         f"{min_cap:,}",
@@ -683,11 +667,14 @@ def _fetch_universe_via_wikipedia(
     return df
 
 
-def _enrich_tickers_via_profile(
+def _enrich_tickers_via_yfinance(
     tickers: list[str],
     min_cap: int,
 ) -> list[dict[str, Any]]:
-    """Fetch FMP profile for each ticker and filter by market cap.
+    """Fetch yfinance profile for each ticker and filter by market cap.
+
+    Uses ``yfinance.Ticker.info`` which requires no API key and has
+    generous rate limits.
 
     Parameters
     ----------
@@ -701,43 +688,82 @@ def _enrich_tickers_via_profile(
     list[dict]
         Rows matching the universe schema for tickers above min_cap.
     """
+    import yfinance as yf
+
     rows: list[dict[str, Any]] = []
     total = len(tickers)
+    failed = 0
 
     for i, ticker in enumerate(tickers):
         if (i + 1) % 50 == 0 or (i + 1) == total:
             logger.info(
-                "Profile enrichment: %d/%d tickers processed...",
-                i + 1,
-                total,
+                "yfinance enrichment: %d/%d tickers processed "
+                "(%d accepted so far)...",
+                i + 1, total, len(rows),
             )
 
-        profile = _fetch_profile(ticker)
-        if profile is None:
-            continue
+        row = _yf_ticker_to_row(yf, ticker, min_cap)
+        if row is not None:
+            rows.append(row)
+        else:
+            failed += 1
 
-        mkt_cap = profile.get("marketCap") or 0
-        if mkt_cap < min_cap:
-            continue
-
-        exchange = profile.get("exchange", "") or ""
-        exchange = exchange.upper()
-        # Normalise exchange names
-        if "NASDAQ" in exchange:
-            exchange = "NASDAQ"
-        elif "NYSE" in exchange:
-            exchange = "NYSE"
-        elif "TSX" in exchange or "TORONTO" in exchange:
-            exchange = "TSX"
-
-        rows.append({
-            "ticker": profile.get("symbol", ticker),
-            "exchange": exchange,
-            "company_name": profile.get("companyName", ""),
-            "market_cap_usd": float(mkt_cap),
-            "sector": profile.get("sector", ""),
-            "industry": profile.get("industry", ""),
-            "country": profile.get("country", ""),
-        })
-
+    if failed:
+        logger.info(
+            "yfinance enrichment: %d tickers skipped (below min_cap "
+            "or info unavailable).",
+            failed,
+        )
     return rows
+
+
+def _yf_ticker_to_row(
+    yf: Any,
+    ticker: str,
+    min_cap: int,
+) -> dict[str, Any] | None:
+    """Convert one yfinance ticker info dict into a universe row.
+
+    Parameters
+    ----------
+    yf:
+        The ``yfinance`` module (passed to avoid repeated imports).
+    ticker:
+        Ticker symbol (e.g. ``"AAPL"`` or ``"RY.TO"``).
+    min_cap:
+        Minimum market cap in USD.
+
+    Returns
+    -------
+    dict or None
+        A single row dict, or ``None`` if the ticker should be skipped.
+    """
+    try:
+        info = yf.Ticker(ticker).info
+    except Exception:
+        return None
+
+    if not info or info.get("quoteType") == "NONE":
+        return None
+
+    mkt_cap = info.get("marketCap") or 0
+    if mkt_cap < min_cap:
+        return None
+
+    exchange = (info.get("exchange") or "").upper()
+    if "NAS" in exchange or "NDQ" in exchange or "NGS" in exchange:
+        exchange = "NASDAQ"
+    elif "NYS" in exchange or "NYQ" in exchange:
+        exchange = "NYSE"
+    elif "TOR" in exchange or "TSX" in exchange:
+        exchange = "TSX"
+
+    return {
+        "ticker": info.get("symbol", ticker),
+        "exchange": exchange,
+        "company_name": info.get("longName") or info.get("shortName", ""),
+        "market_cap_usd": float(mkt_cap),
+        "sector": info.get("sector", ""),
+        "industry": info.get("industry", ""),
+        "country": info.get("country", ""),
+    }

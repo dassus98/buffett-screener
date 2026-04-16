@@ -1,4 +1,10 @@
-"""Fetches 10 years of annual financial statements for every universe ticker via FMP.
+"""Fetches 10 years of annual financial statements for every universe ticker.
+
+Primary source is FMP (Financial Modeling Prep); yfinance is used as an
+automatic fallback when FMP is unavailable or rate-limited.  The fallback is
+transparent: yfinance field names are already listed as substitutes in
+``schema.LINE_ITEM_MAP``, so ``normalize_statement()`` handles both sources
+via ``resolve_all_fields()``.
 
 Retrieves income statements, balance sheets, and cash flow statements, maps every
 field to canonical schema names via ``schema.resolve_all_fields``, and persists raw
@@ -54,7 +60,7 @@ from data_acquisition.api_config import build_fmp_url, fmp_limiter, resilient_re
 from data_acquisition.schema import (
     CANONICAL_COLUMNS,
     LINE_ITEM_MAP,
-    resolve_all_fields,
+    resolve_field,
 )
 from screener.filter_config_loader import get_config
 
@@ -87,6 +93,10 @@ _REQUESTS_PER_TICKER = 3
 
 #: Minimum FMP requests-per-minute assumed for ETA (conservative fallback).
 _MIN_RATE = 60
+
+#: After this many consecutive all-None FMP responses, switch entirely to
+#: yfinance for the remaining tickers (avoids wasting time on 429 errors).
+_MAX_CONSECUTIVE_FMP_FAILURES = 3
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +149,12 @@ def fetch_financial_statements(
         )
 
         try:
-            data = resilient_request(url, params=params, rate_limiter=fmp_limiter)
+            # max_retries=0: fail fast on 429 so the yfinance fallback in
+            # fetch_all_financials kicks in quickly instead of burning 7+
+            # seconds of backoff waits per ticker.
+            data = resilient_request(
+                url, params=params, rate_limiter=fmp_limiter, max_retries=0,
+            )
         except Exception as exc:
             logger.warning(
                 "Failed to fetch %s for %s: %s", stmt_type, ticker, exc
@@ -164,6 +179,95 @@ def fetch_financial_statements(
         )
 
     _persist_raw(ticker, raw_responses)
+    return results
+
+
+def _fetch_statements_yfinance(
+    ticker: str,
+) -> dict[str, pd.DataFrame | None]:
+    """Fetch annual financial statements for one ticker via yfinance.
+
+    Used as a fallback when FMP is unavailable (rate-limited, paid-only, etc.).
+    yfinance field names (e.g. ``"Net Income"``, ``"Total Revenue"``) are listed
+    as substitutes in ``schema.LINE_ITEM_MAP``, so ``normalize_statement()``
+    handles them transparently via ``resolve_all_fields()``.
+
+    The yfinance Ticker object exposes three statement properties:
+
+    * ``.financials`` → annual income statement
+    * ``.balance_sheet`` → annual balance sheet
+    * ``.cashflow`` → annual cash flow
+
+    Each returns a DataFrame with field names as the index and period-end
+    dates as columns.  This function transposes the data so each row is one
+    fiscal year (matching the format ``normalize_statement`` expects).
+
+    Parameters
+    ----------
+    ticker:
+        Ticker symbol (e.g. ``"AAPL"``, ``"SHOP.TO"``).
+
+    Returns
+    -------
+    dict[str, pd.DataFrame | None]
+        Same structure as :func:`fetch_financial_statements`:
+        keys ``"income_statement"``, ``"balance_sheet"``, ``"cash_flow"``.
+        Value is a transposed DataFrame on success, ``None`` on failure.
+
+    Notes
+    -----
+    - No API key required.  Rate limiting is handled by yfinance internally.
+    - Raw responses are NOT persisted to ``data/raw/`` (only FMP raw JSON is).
+    - All monetary values are in full USD dollars (same as FMP), so
+      ``_apply_value_conventions`` applies the same ÷1000 conversion.
+    """
+    import yfinance as yf
+
+    _YF_ATTRS: dict[str, str] = {
+        "income_statement": "financials",
+        "balance_sheet": "balance_sheet",
+        "cash_flow": "cashflow",
+    }
+
+    results: dict[str, pd.DataFrame | None] = {}
+
+    try:
+        t = yf.Ticker(ticker)
+    except Exception as exc:
+        logger.warning("yfinance Ticker(%s) construction failed: %s", ticker, exc)
+        return {k: None for k in _YF_ATTRS}
+
+    for stmt_type, attr_name in _YF_ATTRS.items():
+        try:
+            raw = getattr(t, attr_name)
+            if raw is None or raw.empty:
+                logger.debug("yfinance: no %s data for %s.", stmt_type, ticker)
+                results[stmt_type] = None
+                continue
+
+            # yfinance returns fields as index, dates as columns.
+            # Transpose so each row = one fiscal year, columns = field names.
+            df = raw.T.copy()
+            dates = pd.to_datetime(df.index)
+            df = df.reset_index(drop=True)
+            df["calendarYear"] = dates.year.astype(str)
+            df["date"] = dates.strftime("%Y-%m-%d")
+            results[stmt_type] = df
+            logger.debug(
+                "yfinance: fetched %s for %s (%d years).",
+                stmt_type,
+                ticker,
+                len(df),
+            )
+        except Exception as exc:
+            logger.warning(
+                "yfinance fallback failed for %s / %s: %s",
+                ticker,
+                stmt_type,
+                exc,
+            )
+            results[stmt_type] = None
+
     return results
 
 
@@ -222,19 +326,22 @@ def normalize_statement(
     for _, row in raw_df.iterrows():
         row_dict = row.to_dict()
         fiscal_year = _extract_fiscal_year(row_dict)
-        resolved = resolve_all_fields(row_dict)
 
         canon_row: dict[str, Any] = {
             "ticker": ticker,
             "fiscal_year": fiscal_year,
         }
 
-        for buffett_name, (value, field_used, confidence) in resolved.items():
-            # Only include fields that belong to this statement type.
-            item = LINE_ITEM_MAP[buffett_name]
+        # Only resolve fields belonging to this statement type.
+        # Avoids thousands of spurious "Unresolvable" WARNINGs from trying
+        # e.g. balance_sheet fields against income_statement rows.
+        for buffett_name, item in LINE_ITEM_MAP.items():
             if item.statement != statement_type:
                 continue
 
+            value, field_used, confidence = resolve_field(
+                row_dict, buffett_name,
+            )
             canon_col = CANONICAL_COLUMNS[buffett_name]
 
             if value is None:
@@ -253,7 +360,7 @@ def normalize_statement(
                 )
                 canon_row[canon_col] = processed_value
 
-                if field_used != LINE_ITEM_MAP[buffett_name].ideal_field:
+                if field_used != item.ideal_field:
                     substitution_log.append({
                         "ticker": ticker,
                         "fiscal_year": fiscal_year,
@@ -303,6 +410,11 @@ def fetch_all_financials(
     - Estimated completion time is logged at INFO before the batch starts,
       based on the FMP rate limit from config.
     - Progress is logged every ``batch_size`` tickers at INFO level.
+    - **yfinance fallback**: if FMP returns no data (all three statements
+      ``None``) for ``_MAX_CONSECUTIVE_FMP_FAILURES`` consecutive tickers,
+      the batch switches entirely to yfinance for the remaining tickers.
+      Individual FMP failures also trigger a per-ticker yfinance retry.
+      This makes the pipeline runnable with zero paid API keys.
     """
     tickers: list[str] = universe_df["ticker"].dropna().unique().tolist()
 
@@ -339,10 +451,39 @@ def fetch_all_financials(
     }
     all_substitutions: list[dict[str, Any]] = []
     failed_tickers: list[str] = []
+    consecutive_fmp_failures = 0
+    use_yfinance_only = False
 
     for idx, ticker in enumerate(tickers, start=1):
         try:
-            stmt_dfs = fetch_financial_statements(ticker)
+            if use_yfinance_only:
+                stmt_dfs = _fetch_statements_yfinance(ticker)
+            else:
+                stmt_dfs = fetch_financial_statements(ticker)
+                # Detect FMP rate-limiting: all three statements returned None.
+                if all(v is None for v in stmt_dfs.values()):
+                    consecutive_fmp_failures += 1
+                    logger.info(
+                        "FMP returned no data for %s (%d consecutive). "
+                        "Trying yfinance fallback...",
+                        ticker,
+                        consecutive_fmp_failures,
+                    )
+                    stmt_dfs = _fetch_statements_yfinance(ticker)
+                    if (
+                        consecutive_fmp_failures
+                        >= _MAX_CONSECUTIVE_FMP_FAILURES
+                    ):
+                        logger.warning(
+                            "FMP failed for %d consecutive tickers — "
+                            "switching to yfinance for the remaining "
+                            "%d tickers.",
+                            consecutive_fmp_failures,
+                            total - idx,
+                        )
+                        use_yfinance_only = True
+                else:
+                    consecutive_fmp_failures = 0
 
             for stmt_type in ("income_statement", "balance_sheet", "cash_flow"):
                 raw = stmt_dfs.get(stmt_type)

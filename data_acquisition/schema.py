@@ -227,8 +227,8 @@ LINE_ITEM_MAP: dict[str, LineItem] = {
         substitutes=[
             "generalAndAdministrativeExpenses",       # FMP alternative
             "DERIVED:operatingExpenses-costOfRevenue-depreciationAndAmortization",
-            "Selling General Administrative",         # yfinance label
-            "Selling And Marketing Expense",          # yfinance alternative
+            "Selling General And Administration",     # yfinance label (actual)
+            "Selling General Administrative",         # yfinance older version fallback
         ],
         substitution_confidence="Medium",
         drop_if_missing=False,
@@ -376,7 +376,7 @@ LINE_ITEM_MAP: dict[str, LineItem] = {
         ideal_field="changeInWorkingCapital",
         substitutes=[
             "changesInWorkingCapital",    # FMP alternative spelling
-            "Changes In Working Capital", # yfinance label
+            "Change In Working Capital",  # yfinance label (singular, actual)
             "DERIVED:delta_current_assets-delta_current_liabilities",  # derivation sentinel
         ],
         substitution_confidence="Medium",
