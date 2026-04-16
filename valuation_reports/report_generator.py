@@ -1111,6 +1111,10 @@ def generate_all_reports(
     report_dir = _PROJECT_ROOT / report_dir_str
     report_dir.mkdir(parents=True, exist_ok=True)
 
+    if shortlist_df.empty or "ticker" not in shortlist_df.columns:
+        logger.warning("generate_all_reports: no tickers to report on.")
+        return []
+
     tickers = list(shortlist_df["ticker"])
     total = len(tickers)
     generated: list[pathlib.Path] = []

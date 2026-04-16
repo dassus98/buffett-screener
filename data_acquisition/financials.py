@@ -64,11 +64,12 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-#: FMP endpoint templates for each statement type.
+#: FMP stable endpoint paths for each statement type.
+#: Ticker is passed as the ``symbol`` query parameter (not in the path).
 _ENDPOINTS: dict[str, str] = {
-    "income_statement": "/income-statement/{ticker}",
-    "balance_sheet": "/balance-sheet-statement/{ticker}",
-    "cash_flow": "/cash-flow-statement/{ticker}",
+    "income_statement": "/income-statement",
+    "balance_sheet": "/balance-sheet-statement",
+    "cash_flow": "/cash-flow-statement",
 }
 
 #: FMP date field used to derive fiscal_year.
@@ -128,10 +129,13 @@ def fetch_financial_statements(
         cfg.get("universe", {}).get("required_history_years", 10)
     )
 
-    for stmt_type, endpoint_tpl in _ENDPOINTS.items():
-        endpoint = endpoint_tpl.format(ticker=fmp_ticker)
+    for stmt_type, endpoint in _ENDPOINTS.items():
         url, params = build_fmp_url(
-            endpoint, period="annual", limit=history_years
+            endpoint,
+            use_stable=True,
+            symbol=fmp_ticker,
+            period="annual",
+            limit=history_years,
         )
 
         try:

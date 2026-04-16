@@ -30,6 +30,7 @@ data_sources:
 
   fmp:
     base_url: https://financialmodelingprep.com/api/v3
+    stable_base_url: https://financialmodelingprep.com/stable
     rate_limit_per_min: 300        # FMP Starter tier; adjust for higher tiers
 
   yfinance:

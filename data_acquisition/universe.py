@@ -165,7 +165,15 @@ def fetch_universe() -> pd.DataFrame:
         )
 
     if not all_frames:
-        logger.error("No tickers fetched for any configured exchange: %s", exchanges)
+        logger.warning(
+            "FMP screener returned 0 tickers for all exchanges %s. "
+            "Attempting Wikipedia + FMP profile fallback.",
+            exchanges,
+        )
+        fallback = _fetch_universe_via_wikipedia(exchanges, min_cap)
+        if not fallback.empty:
+            return fallback
+        logger.error("Both FMP screener and Wikipedia fallback returned 0 tickers.")
         return _empty_universe_df()
 
     combined = pd.concat(all_frames, ignore_index=True)
@@ -329,7 +337,10 @@ def get_universe(use_cache: bool = True) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def _fetch_single_exchange(fmp_exchange: str, min_cap: int) -> list[dict[str, Any]]:
-    """Call FMP /stock-screener for one exchange and return raw rows.
+    """Call FMP /company-screener for one exchange and return raw rows.
+
+    Uses the FMP ``/stable/company-screener`` endpoint (the replacement
+    for the deprecated ``/api/v3/stock-screener``).
 
     Parameters
     ----------
@@ -344,7 +355,8 @@ def _fetch_single_exchange(fmp_exchange: str, min_cap: int) -> list[dict[str, An
         Raw JSON rows from FMP. Empty list on error.
     """
     url, params = build_fmp_url(
-        "/stock-screener",
+        "/company-screener",
+        use_stable=True,
         marketCapMoreThan=min_cap,
         exchange=fmp_exchange,
         isActivelyTrading="true",
@@ -492,3 +504,240 @@ def _empty_universe_df() -> pd.DataFrame:
         Zero-row DataFrame with typed columns matching ``UNIVERSE_COLUMNS``.
     """
     return pd.DataFrame(columns=list(UNIVERSE_COLUMNS))
+
+
+# ---------------------------------------------------------------------------
+# Wikipedia + FMP profile fallback (for FMP plans without the screener)
+# ---------------------------------------------------------------------------
+
+_WIKI_SP500_URL = (
+    "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+)
+_WIKI_TSX_URL = (
+    "https://en.wikipedia.org/wiki/S%26P/TSX_Composite_Index"
+)
+_WIKI_HEADERS = {"User-Agent": "BuffettScreener/1.0 (research project)"}
+
+
+def _scrape_sp500_tickers() -> list[str]:
+    """Scrape S&P 500 constituent tickers from Wikipedia.
+
+    Returns
+    -------
+    list[str]
+        Ticker symbols (e.g. ``["AAPL", "MSFT", ...]``).
+        Empty list on failure.
+    """
+    import io
+
+    import requests as _req
+
+    try:
+        resp = _req.get(_WIKI_SP500_URL, headers=_WIKI_HEADERS, timeout=15)
+        resp.raise_for_status()
+        tables = pd.read_html(io.StringIO(resp.text))
+        df = tables[0]
+        symbols = df["Symbol"].astype(str).str.strip().tolist()
+        logger.info("Wikipedia S&P 500: %d tickers scraped.", len(symbols))
+        return symbols
+    except Exception as exc:
+        logger.warning("Failed to scrape S&P 500 from Wikipedia: %s", exc)
+        return []
+
+
+def _scrape_tsx_tickers() -> list[str]:
+    """Scrape S&P/TSX Composite constituent tickers from Wikipedia.
+
+    Returns
+    -------
+    list[str]
+        Ticker symbols with ``.TO`` suffix (e.g. ``["RY.TO", "TD.TO"]``).
+        Empty list on failure.
+    """
+    import io
+
+    import requests as _req
+
+    try:
+        resp = _req.get(_WIKI_TSX_URL, headers=_WIKI_HEADERS, timeout=15)
+        resp.raise_for_status()
+        tables = pd.read_html(io.StringIO(resp.text))
+        # Find the table with a "Symbol" or "Ticker" column
+        for tbl in tables:
+            for col in ("Symbol", "Ticker"):
+                if col in tbl.columns:
+                    syms = tbl[col].astype(str).str.strip().tolist()
+                    # Ensure .TO suffix
+                    syms = [
+                        s if s.endswith(".TO") else f"{s}.TO"
+                        for s in syms if s and s != "nan"
+                    ]
+                    logger.info(
+                        "Wikipedia TSX Composite: %d tickers scraped.",
+                        len(syms),
+                    )
+                    return syms
+        logger.warning("Wikipedia TSX page: no Symbol/Ticker column found.")
+        return []
+    except Exception as exc:
+        logger.warning("Failed to scrape TSX from Wikipedia: %s", exc)
+        return []
+
+
+def _fetch_profile(ticker: str) -> dict[str, Any] | None:
+    """Fetch a single ticker profile from FMP ``/stable/profile``.
+
+    Parameters
+    ----------
+    ticker:
+        Ticker symbol (e.g. ``"AAPL"`` or ``"RY.TO"``).
+
+    Returns
+    -------
+    dict or None
+        Profile dict on success, ``None`` on failure.
+    """
+    url, params = build_fmp_url(
+        "/profile", use_stable=True, symbol=ticker,
+    )
+    try:
+        result = resilient_request(url, params=params, rate_limiter=fmp_limiter)
+    except Exception:
+        return None
+    if isinstance(result, list) and result:
+        return result[0]
+    return None
+
+
+def _fetch_universe_via_wikipedia(
+    exchanges: list[str],
+    min_cap: int,
+) -> pd.DataFrame:
+    """Build the universe from Wikipedia index lists + FMP profile data.
+
+    Fallback used when the FMP screener endpoint is unavailable (e.g.
+    free-tier plans). Scrapes S&P 500 and S&P/TSX Composite constituent
+    lists from Wikipedia, then enriches each ticker with market cap,
+    sector, and industry via the FMP ``/stable/profile`` endpoint.
+
+    Parameters
+    ----------
+    exchanges:
+        List of canonical exchange names from config (e.g.
+        ``["TSX", "NYSE", "NASDAQ"]``).
+    min_cap:
+        Minimum market cap in full USD dollars.
+
+    Returns
+    -------
+    pd.DataFrame
+        Universe DataFrame with columns matching ``UNIVERSE_COLUMNS``.
+    """
+    tickers_by_exchange: dict[str, list[str]] = {}
+
+    # Scrape US indices
+    us_exchanges = {"NYSE", "NASDAQ", "AMEX"}
+    if us_exchanges & set(e.upper() for e in exchanges):
+        sp500 = _scrape_sp500_tickers()
+        if sp500:
+            tickers_by_exchange["US"] = sp500
+
+    # Scrape TSX
+    if "TSX" in (e.upper() for e in exchanges):
+        tsx = _scrape_tsx_tickers()
+        if tsx:
+            tickers_by_exchange["TSX"] = tsx
+
+    all_tickers = []
+    for group_tickers in tickers_by_exchange.values():
+        all_tickers.extend(group_tickers)
+
+    if not all_tickers:
+        logger.error("Wikipedia fallback: no tickers scraped.")
+        return _empty_universe_df()
+
+    logger.info(
+        "Wikipedia fallback: enriching %d tickers via FMP profile...",
+        len(all_tickers),
+    )
+
+    rows = _enrich_tickers_via_profile(all_tickers, min_cap)
+
+    if not rows:
+        return _empty_universe_df()
+
+    df = pd.DataFrame(rows)
+    # Ensure all columns exist
+    for col in UNIVERSE_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+    df = df[list(UNIVERSE_COLUMNS)]
+    df = df.drop_duplicates(subset=["ticker"], keep="first")
+
+    logger.info(
+        "Wikipedia fallback: %d tickers after profile enrichment "
+        "and min_cap filter ($%s).",
+        len(df),
+        f"{min_cap:,}",
+    )
+    return df
+
+
+def _enrich_tickers_via_profile(
+    tickers: list[str],
+    min_cap: int,
+) -> list[dict[str, Any]]:
+    """Fetch FMP profile for each ticker and filter by market cap.
+
+    Parameters
+    ----------
+    tickers:
+        List of ticker symbols to enrich.
+    min_cap:
+        Minimum market cap in USD.
+
+    Returns
+    -------
+    list[dict]
+        Rows matching the universe schema for tickers above min_cap.
+    """
+    rows: list[dict[str, Any]] = []
+    total = len(tickers)
+
+    for i, ticker in enumerate(tickers):
+        if (i + 1) % 50 == 0 or (i + 1) == total:
+            logger.info(
+                "Profile enrichment: %d/%d tickers processed...",
+                i + 1,
+                total,
+            )
+
+        profile = _fetch_profile(ticker)
+        if profile is None:
+            continue
+
+        mkt_cap = profile.get("marketCap") or 0
+        if mkt_cap < min_cap:
+            continue
+
+        exchange = profile.get("exchange", "") or ""
+        exchange = exchange.upper()
+        # Normalise exchange names
+        if "NASDAQ" in exchange:
+            exchange = "NASDAQ"
+        elif "NYSE" in exchange:
+            exchange = "NYSE"
+        elif "TSX" in exchange or "TORONTO" in exchange:
+            exchange = "TSX"
+
+        rows.append({
+            "ticker": profile.get("symbol", ticker),
+            "exchange": exchange,
+            "company_name": profile.get("companyName", ""),
+            "market_cap_usd": float(mkt_cap),
+            "sector": profile.get("sector", ""),
+            "industry": profile.get("industry", ""),
+            "country": profile.get("country", ""),
+        })
+
+    return rows

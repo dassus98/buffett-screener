@@ -525,7 +525,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         stages_run.append("screening")
 
         # --- Stage 4: Output ---
-        if args.mode == "reports":
+        if args.mode == "reports" and not shortlist_df.empty:
             report_paths = _run_stage_4_reports(
                 shortlist_df, screener_summary,
             )
@@ -540,6 +540,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
             except (KeyError, ValueError):
                 report_dir_str = "data/reports"
             logger.info("Reports generated in %s/", report_dir_str)
+
+        elif args.mode == "reports" and shortlist_df.empty:
+            logger.warning(
+                "No stocks in shortlist — skipping report generation. "
+                "Check that API keys in .env are valid and not placeholders.",
+            )
+            stages_run.append("reports")
 
         elif args.mode == "dashboard":
             _run_stage_4_dashboard()

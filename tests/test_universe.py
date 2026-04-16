@@ -509,26 +509,34 @@ class TestFetchUniverse:
             fetch_universe()
         assert any("truncated" in r.message for r in caplog.records)
 
+    @patch("data_acquisition.universe._fetch_universe_via_wikipedia")
     @patch("data_acquisition.universe.resilient_request")
     @patch("data_acquisition.universe.get_config")
-    def test_api_error_returns_empty_df(self, mock_cfg, mock_req) -> None:
+    def test_api_error_returns_empty_df(
+        self, mock_cfg, mock_req, mock_wiki,
+    ) -> None:
         mock_cfg.return_value = {
             "universe": {"exchanges": ["NYSE"], "min_market_cap_usd": 500_000_000},
             "exclusions": {"sectors": []},
         }
         mock_req.side_effect = Exception("connection refused")
+        mock_wiki.return_value = _empty_universe_df()
         df = fetch_universe()
         assert len(df) == 0
 
+    @patch("data_acquisition.universe._fetch_universe_via_wikipedia")
     @patch("data_acquisition.universe.resilient_request")
     @patch("data_acquisition.universe.get_config")
-    def test_min_cap_passed_to_api(self, mock_cfg, mock_req) -> None:
+    def test_min_cap_passed_to_api(
+        self, mock_cfg, mock_req, mock_wiki,
+    ) -> None:
         """marketCapMoreThan must equal the config value."""
         mock_cfg.return_value = {
             "universe": {"exchanges": ["NYSE"], "min_market_cap_usd": 999_000_000},
             "exclusions": {"sectors": []},
         }
         mock_req.return_value = []
+        mock_wiki.return_value = _empty_universe_df()
         fetch_universe()
         _, call_kwargs = mock_req.call_args
         params = call_kwargs.get("params", {})

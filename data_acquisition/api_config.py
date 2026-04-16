@@ -435,7 +435,12 @@ def _redact_key(url: str, params: dict[str, Any]) -> str:
 # build_fmp_url
 # ---------------------------------------------------------------------------
 
-def build_fmp_url(endpoint: str, **params: Any) -> tuple[str, dict[str, Any]]:
+def build_fmp_url(
+    endpoint: str,
+    *,
+    use_stable: bool = False,
+    **params: Any,
+) -> tuple[str, dict[str, Any]]:
     """Construct a fully-qualified FMP API URL with the API key in the params dict.
 
     The API key is placed in ``params`` (not the URL path) so that log messages
@@ -445,6 +450,11 @@ def build_fmp_url(endpoint: str, **params: Any) -> tuple[str, dict[str, Any]]:
     ----------
     endpoint:
         Path segment starting with ``/``, e.g. ``"/income-statement/AAPL"``.
+    use_stable:
+        If ``True``, use FMP's ``/stable/`` base URL instead of the legacy
+        ``/api/v3`` URL.  Required for endpoints deprecated after
+        August 2025.  Reads ``data_sources.fmp.stable_base_url`` from
+        config.
     **params:
         Additional query-string parameters (e.g. ``period="annual"``,
         ``limit=10``). These are merged with the ``apikey`` entry.
@@ -466,10 +476,17 @@ def build_fmp_url(endpoint: str, **params: Any) -> tuple[str, dict[str, Any]]:
     >>> "apikey" in p
     True
     """
-    base_url: str = _DATA_SOURCES.get("fmp", {}).get(
-        "base_url", "https://financialmodelingprep.com/api/v3"
-    )
-    # urljoin handles trailing/leading slashes correctly.
+    fmp_cfg = _DATA_SOURCES.get("fmp", {})
+    if use_stable:
+        base_url = fmp_cfg.get(
+            "stable_base_url",
+            "https://financialmodelingprep.com/stable",
+        )
+    else:
+        base_url = fmp_cfg.get(
+            "base_url",
+            "https://financialmodelingprep.com/api/v3",
+        )
     full_url = base_url.rstrip("/") + endpoint
     params_with_key: dict[str, Any] = {"apikey": get_fmp_key(), **params}
     return full_url, params_with_key
