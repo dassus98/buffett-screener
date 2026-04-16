@@ -65,6 +65,7 @@ logger = logging.getLogger(__name__)
 _NAN_SCENARIO: dict[str, Any] = {
     "growth": float("nan"),
     "pe": float("nan"),
+    "discount_rate": float("nan"),
     "projected_price": float("nan"),
     "present_value": float("nan"),
     "annual_return": float("nan"),
@@ -237,6 +238,7 @@ def _compute_one_scenario(
     return {
         "growth": float(growth_rate),
         "pe": float(terminal_pe),
+        "discount_rate": float(discount_rate),
         "projected_price": float(projected_price),
         "present_value": float(present_value),
         "annual_return": float(annual_return),

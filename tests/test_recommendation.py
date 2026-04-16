@@ -2,8 +2,10 @@
 
 Covers:
   - generate_recommendation (BUY / HOLD / PASS tiers, confidence levels)
-  - recommend_account (RRSP / TFSA / Either logic)
-  - generate_sell_signals (OK / WARNING / TRIGGERED classification)
+  - recommend_account (RRSP / TFSA / Either logic, TFSA preference)
+  - generate_sell_signals (OK / WARNING / TRIGGERED classification,
+    compound leverage signal)
+  - apply_sell_signal_override (REPORT_SPEC §5 override rule)
   - generate_entry_strategy (ideal entry, narrative)
 """
 
@@ -14,6 +16,7 @@ import math
 import pytest
 
 from valuation_reports.recommendation import (
+    apply_sell_signal_override,
     generate_entry_strategy,
     generate_recommendation,
     generate_sell_signals,
@@ -306,13 +309,13 @@ class TestRecommendAccount:
         assert result["account"] == "RRSP"
         assert "withholding" in result["reasoning"].lower()
 
-    def test_us_ticker_no_dividend_either(self):
-        """US-listed + no dividend → Either."""
+    def test_us_ticker_no_dividend_moderate_return_either(self):
+        """US-listed + no dividend + moderate return → Either."""
         result = recommend_account(
             ticker="AMZN",
             exchange="NASDAQ",
             dividend_yield=0.0,
-            expected_return=0.15,
+            expected_return=0.08,
         )
         assert result["account"] == "Either"
 
@@ -347,22 +350,22 @@ class TestRecommendAccount:
         assert result["account"] == "RRSP"
 
     def test_us_dividend_below_boundary(self):
-        """Dividend yield = 0.005 → Either (< threshold)."""
+        """Dividend yield = 0.005 + moderate return → Either (< threshold)."""
         result = recommend_account(
             ticker="BRK.B",
             exchange="NYSE",
             dividend_yield=0.005,
-            expected_return=0.12,
+            expected_return=0.08,
         )
         assert result["account"] == "Either"
 
     def test_nan_dividend_treated_as_zero(self):
-        """NaN dividend yield → no dividend → Either for US stocks."""
+        """NaN dividend yield → no dividend → Either for US stocks (moderate return)."""
         result = recommend_account(
             ticker="GOOG",
             exchange="NASDAQ",
             dividend_yield=float("nan"),
-            expected_return=0.15,
+            expected_return=0.08,
         )
         assert result["account"] == "Either"
 
@@ -517,6 +520,237 @@ class TestGenerateSellSignals:
             "overvaluation",
             "capital_misallocation",
         }
+
+    # --- Compound leverage signal (D/E OR debt payoff years) ---
+
+    def test_leverage_triggered_by_debt_payoff_years(self):
+        """Debt payoff years > 5 → TRIGGERED (even if D/E is fine)."""
+        signals = generate_sell_signals(
+            "DBTYR",
+            self._base_metrics(de_ratio_latest=0.30, debt_payoff_years=7.0),
+        )
+        lev_sig = next(s for s in signals if s["signal"] == "leverage_spike")
+        assert lev_sig["status"] == "TRIGGERED"
+        assert "payoff" in lev_sig["description"].lower()
+
+    def test_leverage_triggered_by_both_axes(self):
+        """Both D/E and debt payoff exceed thresholds → TRIGGERED."""
+        signals = generate_sell_signals(
+            "BOTH",
+            self._base_metrics(de_ratio_latest=1.5, debt_payoff_years=8.0),
+        )
+        lev_sig = next(s for s in signals if s["signal"] == "leverage_spike")
+        assert lev_sig["status"] == "TRIGGERED"
+        # Description should mention both
+        desc_lower = lev_sig["description"].lower()
+        assert "d/e" in desc_lower
+        assert "payoff" in desc_lower
+
+    def test_leverage_warning_debt_payoff_approaching(self):
+        """Debt payoff at 4.5 (within 20% of 5.0 = 4.0-5.0) → WARNING."""
+        signals = generate_sell_signals(
+            "DPWARN",
+            self._base_metrics(de_ratio_latest=0.30, debt_payoff_years=4.5),
+        )
+        lev_sig = next(s for s in signals if s["signal"] == "leverage_spike")
+        assert lev_sig["status"] == "WARNING"
+
+    def test_leverage_ok_when_both_healthy(self):
+        """D/E=0.30, payoff=2.0 → both well below thresholds → OK."""
+        signals = generate_sell_signals(
+            "HLTH",
+            self._base_metrics(de_ratio_latest=0.30, debt_payoff_years=2.0),
+        )
+        lev_sig = next(s for s in signals if s["signal"] == "leverage_spike")
+        assert lev_sig["status"] == "OK"
+
+    # --- Gross margin erosion with decline data ---
+
+    def test_gross_margin_erosion_triggered(self):
+        """3-year decline > 5pp → TRIGGERED."""
+        signals = generate_sell_signals(
+            "GMERR",
+            self._base_metrics(gross_margin_decline_3yr=0.08),
+        )
+        gm_sig = next(s for s in signals if s["signal"] == "gross_margin_erosion")
+        assert gm_sig["status"] == "TRIGGERED"
+
+    def test_gross_margin_erosion_warning(self):
+        """3-year decline within 20% of 5pp (4-5pp) → WARNING."""
+        signals = generate_sell_signals(
+            "GMWARN",
+            self._base_metrics(gross_margin_decline_3yr=0.045),
+        )
+        gm_sig = next(s for s in signals if s["signal"] == "gross_margin_erosion")
+        assert gm_sig["status"] == "WARNING"
+
+    def test_gross_margin_erosion_ok_when_small_decline(self):
+        """3-year decline = 2pp (well below 5pp) → OK."""
+        signals = generate_sell_signals(
+            "GMOK",
+            self._base_metrics(gross_margin_decline_3yr=0.02),
+        )
+        gm_sig = next(s for s in signals if s["signal"] == "gross_margin_erosion")
+        assert gm_sig["status"] == "OK"
+
+
+# ---------------------------------------------------------------------------
+# Tests: recommend_account — TFSA preference for high expected return
+# ---------------------------------------------------------------------------
+
+
+class TestRecommendAccountTfsaPreference:
+    """Tests for TFSA preference when expected return is high."""
+
+    def test_us_no_dividend_high_return_tfsa(self):
+        """US-listed + no dividend + expected return ≥ 12% → TFSA."""
+        result = recommend_account(
+            ticker="AMZN",
+            exchange="NASDAQ",
+            dividend_yield=0.0,
+            expected_return=0.15,
+        )
+        assert result["account"] == "TFSA"
+        assert "tax-free" in result["reasoning"].lower()
+
+    def test_us_no_dividend_at_return_boundary_tfsa(self):
+        """US-listed + no dividend + expected return = 12% exactly → TFSA."""
+        result = recommend_account(
+            ticker="GOOG",
+            exchange="NYSE",
+            dividend_yield=0.0,
+            expected_return=0.12,
+        )
+        assert result["account"] == "TFSA"
+
+    def test_us_no_dividend_below_return_boundary_either(self):
+        """US-listed + no dividend + expected return = 11% → Either."""
+        result = recommend_account(
+            ticker="JNJ",
+            exchange="NYSE",
+            dividend_yield=0.005,
+            expected_return=0.11,
+        )
+        assert result["account"] == "Either"
+
+    def test_us_dividend_still_rrsp_despite_high_return(self):
+        """US-listed + dividend ≥ 1% → RRSP regardless of expected return.
+
+        Withholding tax savings dominate when dividends are significant.
+        """
+        result = recommend_account(
+            ticker="KO",
+            exchange="NYSE",
+            dividend_yield=0.03,
+            expected_return=0.20,
+        )
+        assert result["account"] == "RRSP"
+
+
+# ---------------------------------------------------------------------------
+# Tests: apply_sell_signal_override
+# ---------------------------------------------------------------------------
+
+
+class TestApplySellSignalOverride:
+    """Tests for REPORT_SPEC §5 recommendation override rule."""
+
+    def _buy_rec(self) -> dict:
+        return {
+            "recommendation": "BUY",
+            "confidence": "High",
+            "reasoning": "Strong fundamentals.",
+        }
+
+    def _ok_signals(self) -> list[dict]:
+        return [
+            {"signal": "roe_deterioration", "status": "OK",
+             "current_value": 0.20, "threshold": 0.12,
+             "description": "OK"},
+            {"signal": "leverage_spike", "status": "OK",
+             "current_value": 0.30, "threshold": 1.0,
+             "description": "OK"},
+        ]
+
+    def _triggered_signals(self) -> list[dict]:
+        return [
+            {"signal": "roe_deterioration", "status": "TRIGGERED",
+             "current_value": 0.10, "threshold": 0.12,
+             "description": "ROE below floor."},
+            {"signal": "leverage_spike", "status": "OK",
+             "current_value": 0.30, "threshold": 1.0,
+             "description": "OK"},
+        ]
+
+    def test_no_override_when_all_ok(self):
+        rec = apply_sell_signal_override(self._buy_rec(), self._ok_signals())
+        assert rec["recommendation"] == "BUY"
+        assert rec["confidence"] == "High"
+
+    def test_override_to_pass_when_triggered(self):
+        rec = apply_sell_signal_override(
+            self._buy_rec(), self._triggered_signals(), ticker="TEST",
+        )
+        assert rec["recommendation"] == "PASS"
+        assert "overridden" in rec["reasoning"].lower()
+        assert "roe_deterioration" in rec["reasoning"]
+
+    def test_confidence_preserved_after_override(self):
+        """Confidence level is independent of recommendation tier."""
+        rec = apply_sell_signal_override(
+            self._buy_rec(), self._triggered_signals(),
+        )
+        assert rec["confidence"] == "High"
+
+    def test_override_with_multiple_triggered_signals(self):
+        signals = [
+            {"signal": "roe_deterioration", "status": "TRIGGERED",
+             "current_value": 0.10, "threshold": 0.12,
+             "description": "ROE below floor."},
+            {"signal": "leverage_spike", "status": "TRIGGERED",
+             "current_value": 1.5, "threshold": 1.0,
+             "description": "Leverage excessive."},
+        ]
+        rec = apply_sell_signal_override(self._buy_rec(), signals)
+        assert rec["recommendation"] == "PASS"
+        assert "roe_deterioration" in rec["reasoning"]
+        assert "leverage_spike" in rec["reasoning"]
+
+    def test_warning_does_not_trigger_override(self):
+        signals = [
+            {"signal": "roe_deterioration", "status": "WARNING",
+             "current_value": 0.13, "threshold": 0.12,
+             "description": "Approaching floor."},
+        ]
+        rec = apply_sell_signal_override(self._buy_rec(), signals)
+        assert rec["recommendation"] == "BUY"
+
+    def test_empty_signals_no_override(self):
+        rec = apply_sell_signal_override(self._buy_rec(), [])
+        assert rec["recommendation"] == "BUY"
+
+    def test_hold_overridden_to_pass(self):
+        hold_rec = {
+            "recommendation": "HOLD",
+            "confidence": "Moderate",
+            "reasoning": "Decent metrics.",
+        }
+        rec = apply_sell_signal_override(
+            hold_rec, self._triggered_signals(),
+        )
+        assert rec["recommendation"] == "PASS"
+
+    def test_pass_stays_pass(self):
+        """PASS recommendation is not changed (already PASS)."""
+        pass_rec = {
+            "recommendation": "PASS",
+            "confidence": "Low",
+            "reasoning": "Weak metrics.",
+        }
+        rec = apply_sell_signal_override(
+            pass_rec, self._triggered_signals(),
+        )
+        assert rec["recommendation"] == "PASS"
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,9 @@ Upstream producers:
     - ``valuation_reports.recommendation``
       → generate_recommendation, recommend_account,
         generate_sell_signals, generate_entry_strategy.
+    - ``valuation_reports.qualitative_prompts.enrich_report_with_moat``
+      → optional LLM moat assessment (Step 25); no-ops if
+        ``reports.enable_qualitative`` is false or API key is absent.
     - ``metrics_engine.growth.compute_eps_cagr``
 
 Downstream consumers:
@@ -36,6 +39,7 @@ Config dependencies:
     - ``valuation.terminal_growth_rate``
     - ``recommendations.time_horizon.*``
     - ``recommendations.position_sizing.*``
+    - ``reports.enable_qualitative``  (bool, default ``false``)
 
 Authoritative spec: docs/REPORT_SPEC.md.
 """
@@ -57,7 +61,9 @@ from screener.filter_config_loader import get_threshold
 from valuation_reports.earnings_yield import assess_yield_attractiveness
 from valuation_reports.intrinsic_value import compute_full_valuation
 from valuation_reports.margin_of_safety import compute_sensitivity_table
+from valuation_reports.qualitative_prompts import enrich_report_with_moat
 from valuation_reports.recommendation import (
+    apply_sell_signal_override,
     generate_entry_strategy,
     generate_recommendation,
     generate_sell_signals,
@@ -520,7 +526,10 @@ def _build_metrics_for_sell_signals(
     else:
         metrics["avg_roe_10yr"] = float("nan")
 
-    # Gross margin avg
+    # Gross margin avg + 3-year rolling decline
+    #     Per REPORT_SPEC §5: "Gross margin declines > 5pp over any 3-year
+    #     rolling window → sell signal."  We compute the max 3-year decline
+    #     in pp (positive = margin has declined).
     if not inc_df.empty and "gross_profit" in inc_df.columns and "total_revenue" in inc_df.columns:
         rev = inc_df["total_revenue"]
         gp = inc_df["gross_profit"]
@@ -528,10 +537,24 @@ def _build_metrics_for_sell_signals(
         if valid.any():
             gm_vals = gp[valid] / rev[valid]
             metrics["gross_margin_avg_10yr"] = float(gm_vals.mean())
+            # Compute 3-year rolling decline from year-sorted margins
+            sorted_df = inc_df.loc[valid].sort_values("fiscal_year")
+            gm_sorted = (sorted_df["gross_profit"] / sorted_df["total_revenue"]).values
+            if len(gm_sorted) >= 4:
+                # Max decline over any 3-year window (positive = decline)
+                declines = [
+                    gm_sorted[i] - gm_sorted[i + 3]
+                    for i in range(len(gm_sorted) - 3)
+                ]
+                metrics["gross_margin_decline_3yr"] = float(max(declines))
+            else:
+                metrics["gross_margin_decline_3yr"] = float("nan")
         else:
             metrics["gross_margin_avg_10yr"] = float("nan")
+            metrics["gross_margin_decline_3yr"] = float("nan")
     else:
         metrics["gross_margin_avg_10yr"] = float("nan")
+        metrics["gross_margin_decline_3yr"] = float("nan")
 
     # D/E latest
     if not bs_df.empty and "long_term_debt" in bs_df.columns:
@@ -661,6 +684,12 @@ def build_report_context(ticker: str) -> dict[str, Any]:
     # --- Step 10: Sell signals ---
     sell_triggers = generate_sell_signals(ticker, sell_metrics)
 
+    # --- Step 10b: Override recommendation if any sell signal is TRIGGERED ---
+    #     Per REPORT_SPEC §5: "Triggered sell signals cause the
+    #     recommendation to be overridden to PASS regardless of MoS or
+    #     composite score."
+    rec = apply_sell_signal_override(rec, sell_triggers, ticker=ticker)
+
     # --- Step 11: Entry strategy ---
     entry = generate_entry_strategy(
         current_price=valuation.get("current_price", float("nan")),
@@ -775,11 +804,13 @@ def build_report_context(ticker: str) -> dict[str, Any]:
         capex_flag = capex_flag_years > 0
 
     # --- Assemble full context ---
-    return {
+    ctx: dict[str, Any] = {
         # Header
         "company_name": universe["company_name"],
         "ticker": ticker,
         "exchange": universe["exchange"],
+        "sector": universe["sector"],
+        "industry": universe["industry"],
         "report_date": datetime.date.today().isoformat(),
         "latest_fiscal_year": latest_fy or "N/A",
         # Executive Summary
@@ -792,7 +823,7 @@ def build_report_context(ticker: str) -> dict[str, Any]:
         "account_recommendation": acct["account"],
         "time_horizon_years": time_horizon,
         "critical_flags": critical_flags,
-        # Moat
+        # Moat — defaults; overridden by enrich_report_with_moat if enabled
         "qualitative_enabled": False,
         "moat_assessment": None,
         "moat_indicators": None,
@@ -801,6 +832,13 @@ def build_report_context(ticker: str) -> dict[str, Any]:
         ),
         "roe_avg_10yr": _safe_float(
             sell_metrics.get("avg_roe_10yr"), 0.0,
+        ),
+        # Sell-derived metrics (used by enrich_report_with_moat)
+        "de_ratio_latest": _safe_float(
+            sell_metrics.get("de_ratio_latest"), 0.0,
+        ),
+        "debt_payoff_years": _safe_float(
+            sell_metrics.get("debt_payoff_years"), 0.0,
         ),
         # Financial Statement Tests
         "income_tests": income_tests,
@@ -823,17 +861,17 @@ def build_report_context(ticker: str) -> dict[str, Any]:
         # Scenario details
         "bear_growth": _safe_float(bear_s.get("growth")),
         "bear_terminal_pe": _safe_float(bear_s.get("pe")),
-        "bear_discount_rate": _safe_float(bear_s.get("growth")),  # placeholder
+        "bear_discount_rate": _safe_float(bear_s.get("discount_rate")),
         "bear_probability": _safe_float(bear_s.get("probability"), 0.25),
         "iv_bear": _safe_float(bear_s.get("present_value")),
         "base_growth": _safe_float(base_s.get("growth")),
         "base_terminal_pe": _safe_float(base_s.get("pe")),
-        "base_discount_rate": _safe_float(base_s.get("growth")),  # placeholder
+        "base_discount_rate": _safe_float(base_s.get("discount_rate")),
         "base_probability": _safe_float(base_s.get("probability"), 0.50),
         "iv_base": _safe_float(base_s.get("present_value")),
         "bull_growth": _safe_float(bull_s.get("growth")),
         "bull_terminal_pe": _safe_float(bull_s.get("pe")),
-        "bull_discount_rate": _safe_float(bull_s.get("growth")),  # placeholder
+        "bull_discount_rate": _safe_float(bull_s.get("discount_rate")),
         "bull_probability": _safe_float(bull_s.get("probability"), 0.25),
         "iv_bull": _safe_float(bull_s.get("present_value")),
         # Margin of Safety
@@ -858,12 +896,22 @@ def build_report_context(ticker: str) -> dict[str, Any]:
         # Bear Case
         "bear_case_arguments": bear_case_arguments,
         # Investment Strategy
+        "entry_strategy": entry,
         "position_sizing_guidance": position_sizing_guidance,
         "sell_triggers": sell_triggers,
         "account_reasoning": acct["reasoning"],
         # Data Quality
         "data_quality": data_quality,
     }
+
+    # --- Step 25: Conditional LLM moat enrichment ---
+    #     enrich_report_with_moat checks reports.enable_qualitative and
+    #     ANTHROPIC_API_KEY before making any API call.  If either is
+    #     absent, it sets qualitative_enabled=False and moat_assessment=None
+    #     — the template then renders the quantitative-only fallback.
+    enrich_report_with_moat(ctx)
+
+    return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -993,6 +1041,8 @@ def render_summary(
             "company_name": row.get("company_name", ""),
             "exchange": row.get("exchange", ""),
             "composite_score": _safe_float(row.get("composite_score")),
+            "iv_weighted": _safe_float(row.get("iv_weighted")),
+            "current_price_usd": _safe_float(row.get("current_price_usd")),
             "margin_of_safety_pct": _safe_float(row.get("margin_of_safety_pct")),
             "recommendation": row.get("recommendation", ""),
             "confidence_level": row.get("confidence_level", ""),

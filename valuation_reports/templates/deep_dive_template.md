@@ -1,9 +1,26 @@
+{#- ====================================================================
+    Deep-Dive Analysis Report Template (Jinja2)
+
+    Rendered by: valuation_reports/report_generator.py
+    Spec:        docs/REPORT_SPEC.md
+    Context:     build_report_context(ticker) → dict with 55+ keys
+
+    All {{ }} blocks are Jinja2 variables populated from the context
+    dict.  All thresholds referenced in conditional logic come from
+    config/filter_config.yaml — no hardcoded numbers in this template.
+    ==================================================================== -#}
 # {{ company_name }} ({{ ticker }}) — Buffett Analysis Report
 
 Generated: {{ report_date }} | Data as of: {{ latest_fiscal_year }}
 
 ---
 
+{#- ----------------------------------------------------------------
+    Section 1: Executive Summary
+    Source: build_report_context → composite_score, iv_weighted,
+            current_price_usd, margin_of_safety_pct, recommendation,
+            confidence_level, account_recommendation, time_horizon_years
+    ---------------------------------------------------------------- -#}
 ## Executive Summary
 
 | | |
@@ -23,6 +40,11 @@ Generated: {{ report_date }} | Data as of: {{ latest_fiscal_year }}
 
 ---
 
+{#- ----------------------------------------------------------------
+    Section 2: Durable Competitive Advantage Assessment
+    Conditionally rendered: qualitative (LLM-assisted) if enabled,
+    otherwise quantitative indicators from metrics_engine.
+    ---------------------------------------------------------------- -#}
 ## Durable Competitive Advantage Assessment
 
 {% if qualitative_enabled and moat_assessment %}
@@ -51,6 +73,12 @@ config/filter_config.yaml and provide an LLM API key to enable.*
 
 ---
 
+{#- ----------------------------------------------------------------
+    Section 3: Financial Statement Analysis (10-Year)
+    Three sub-tables: Income, Balance Sheet, Cash Flow.
+    Each has a test summary table and optional year-by-year detail.
+    Conditional flags for negative equity and CapEx anomalies.
+    ---------------------------------------------------------------- -#}
 ## Financial Statement Analysis (10-Year)
 
 ### Income Statement Tests
@@ -120,6 +148,12 @@ config/filter_config.yaml and provide an LLM API key to enable.*
 
 ---
 
+{#- ----------------------------------------------------------------
+    Section 4: Valuation — Three Scenarios
+    Bear / Base / Bull intrinsic value projections (F14),
+    Margin of Safety interpretation (F15),
+    Earnings Yield vs Bond Yield (F16).
+    ---------------------------------------------------------------- -#}
 ## Valuation — Three Scenarios
 
 **Base inputs:** EPS (latest): ${{ eps_latest | round(2) }} | 10-yr EPS CAGR: {{ (eps_cagr_10yr * 100) | round(1) }}% |
@@ -161,6 +195,12 @@ Scenario weights and growth multipliers from config/filter_config.yaml.*
 
 ---
 
+{#- ----------------------------------------------------------------
+    Section 5: Sensitivity Analysis
+    Conditionally rendered when sensitivity_data is populated.
+    Three one-axis-at-a-time tables: EPS growth, P/E, discount rate.
+    Each entry is a (param_value, iv, mos) triple.
+    ---------------------------------------------------------------- -#}
 {% if sensitivity_data %}
 ## Sensitivity Analysis
 
@@ -205,6 +245,11 @@ Intrinsic value under alternative assumptions (Base scenario, USD):
 ---
 {% endif %}
 
+{#- ----------------------------------------------------------------
+    Section 6: Assumption Log
+    Auto-populated from data quality checks and substitutions.
+    Each row: assumption, confidence, failure_mode, consequence.
+    ---------------------------------------------------------------- -#}
 ## Assumption Log
 
 {% if assumption_log %}
@@ -222,6 +267,10 @@ See data/processed/data_quality_report.csv for full substitution log.*
 
 ---
 
+{#- ----------------------------------------------------------------
+    Section 7: Devil's Advocate — Bear Case
+    Quantitative flags + optional LLM qualitative analysis.
+    ---------------------------------------------------------------- -#}
 ## Devil's Advocate — Bear Case
 
 {% if bear_case_arguments %}
@@ -240,9 +289,22 @@ CapEx intensity) supplemented by LLM qualitative analysis if enabled.*
 
 ---
 
+{#- ----------------------------------------------------------------
+    Section 8: Investment Strategy
+    Entry target, time horizon, position sizing, sell triggers,
+    account recommendation.  entry_strategy dict comes from
+    recommendation.generate_entry_strategy().
+    ---------------------------------------------------------------- -#}
 ## Investment Strategy
 
+{% if entry_strategy %}
+**Entry Price Target:** ${{ entry_strategy.ideal_entry | round(2) }} USD ({{ (mos_moderate * 100) | round(0) }}% margin of safety)
+
+{{ entry_strategy.strategy }}
+
+{% else %}
 **Entry Price Target:** ${{ buy_below_moderate | round(2) }} USD ({{ (mos_moderate * 100) | round(0) }}% margin of safety)
+{% endif %}
 {% if exchange == "TSX" and buy_below_moderate_cad is defined %}
 **Entry Price (CAD equivalent):** ${{ buy_below_moderate_cad | round(2) }} CAD (at {{ usd_cad_rate }} USD/CAD)
 {% endif %}
@@ -272,6 +334,10 @@ CapEx intensity) supplemented by LLM qualitative analysis if enabled.*
 
 ---
 
+{#- ----------------------------------------------------------------
+    Section 9: Data Quality Notes
+    Years of data, substitutions, missing fields, quality flags.
+    ---------------------------------------------------------------- -#}
 ## Data Quality Notes
 
 {% if data_quality %}

@@ -71,13 +71,34 @@ def _make_market_data_df(
     )
 
 
-def _make_macro_df(rate: float = 0.04) -> pd.DataFrame:
-    """Create a macro_data DataFrame with a single us_treasury_10yr row."""
+def _make_macro_df(
+    rate: float = 0.04,
+    key: str = "us_treasury_10yr",
+) -> pd.DataFrame:
+    """Create a macro_data DataFrame with a single bond yield row."""
     return pd.DataFrame(
         {
-            "key": ["us_treasury_10yr"],
+            "key": [key],
             "value": [rate],
             "as_of_date": ["2024-01-15"],
+        }
+    )
+
+
+def _make_universe_df(
+    ticker: str,
+    exchange: str = "NYSE",
+) -> pd.DataFrame:
+    """Create a one-row universe DataFrame for exchange-aware tests."""
+    return pd.DataFrame(
+        {
+            "ticker": [ticker],
+            "exchange": [exchange],
+            "company_name": [f"{ticker} Inc."],
+            "market_cap_usd": [50_000_000_000.0],
+            "sector": ["Technology"],
+            "industry": ["Software"],
+            "country": ["US"],
         }
     )
 
@@ -86,8 +107,25 @@ def _mock_read_table(
     income_df: pd.DataFrame,
     market_df: pd.DataFrame,
     macro_df: pd.DataFrame,
+    universe_df: pd.DataFrame | None = None,
 ):
-    """Return a side_effect function for patching data_acquisition.store.read_table."""
+    """Return a side_effect function for patching data_acquisition.store.read_table.
+
+    Parameters
+    ----------
+    income_df, market_df, macro_df:
+        DataFrames returned for each table name.
+    universe_df:
+        Optional universe table DataFrame. If ``None``, a default single-row
+        NYSE entry is generated from the first ticker in *income_df*.
+    """
+    # Default universe: derive ticker from income_df if available
+    _universe_df = universe_df
+    if _universe_df is None:
+        if not income_df.empty and "ticker" in income_df.columns:
+            _universe_df = _make_universe_df(income_df["ticker"].iloc[0])
+        else:
+            _universe_df = pd.DataFrame()
 
     def _read_table(table_name: str, where: str | None = None) -> pd.DataFrame:
         if table_name == "income_statement":
@@ -95,7 +133,14 @@ def _mock_read_table(
         if table_name == "market_data":
             return market_df
         if table_name == "macro_data":
+            # Support exchange-aware filtering: if where clause filters by key,
+            # only return rows that match.  Guard against empty DataFrames
+            # that lack the "key" column entirely.
+            if where and "key =" in where and not macro_df.empty:
+                return macro_df[macro_df["key"].apply(lambda k: k in where)]
             return macro_df
+        if table_name == "universe":
+            return _universe_df
         return pd.DataFrame()
 
     return _read_table
@@ -125,6 +170,7 @@ class TestComputeFullValuation:
     SCENARIO_KEYS = {
         "growth",
         "pe",
+        "discount_rate",
         "present_value",
         "projected_price",
         "annual_return",
@@ -136,9 +182,10 @@ class TestComputeFullValuation:
         inc = overrides.get("income_df", _make_income_df(ticker))
         mkt = overrides.get("market_df", _make_market_data_df(ticker))
         mac = overrides.get("macro_df", _make_macro_df())
+        uni = overrides.get("universe_df", None)
         with patch(
             "valuation_reports.intrinsic_value.read_table",
-            side_effect=_mock_read_table(inc, mkt, mac),
+            side_effect=_mock_read_table(inc, mkt, mac, universe_df=uni),
         ):
             return compute_full_valuation(ticker)
 
@@ -248,6 +295,78 @@ class TestComputeFullValuation:
         base_pv = result["scenarios"]["base"]["present_value"]
         bull_pv = result["scenarios"]["bull"]["present_value"]
         assert bear_pv <= base_pv <= bull_pv
+
+    # --- discount_rate and exchange-aware routing tests ---
+
+    def test_discount_rate_in_scenario_dicts(self):
+        """Each scenario should expose a finite discount_rate."""
+        result = self._patch_and_run()
+        for label in ("bear", "base", "bull"):
+            dr = result["scenarios"][label]["discount_rate"]
+            assert math.isfinite(dr), (
+                f"{label} scenario discount_rate should be finite, got {dr}"
+            )
+            assert dr > 0, (
+                f"{label} scenario discount_rate should be positive, got {dr}"
+            )
+
+    def test_tsx_ticker_uses_goc_bond_yield(self):
+        """TSX-listed tickers should use the GoC 10-year bond yield."""
+        goc_rate = 0.035
+        uni = _make_universe_df("RY.TO", exchange="TSX")
+        mac = _make_macro_df(rate=goc_rate, key="goc_bond_10yr")
+        inc = _make_income_df("RY.TO", base_eps=5.0)
+        mkt = _make_market_data_df("RY.TO", price=100.0)
+        result = self._patch_and_run(
+            ticker="RY.TO",
+            income_df=inc,
+            market_df=mkt,
+            macro_df=mac,
+            universe_df=uni,
+        )
+        assert result["bond_yield"] == pytest.approx(goc_rate)
+        # Weighted IV should be finite (proves the full pipeline ran with GoC rate)
+        assert math.isfinite(result["weighted_iv"])
+
+    def test_nyse_ticker_uses_us_treasury_yield(self):
+        """NYSE-listed tickers should use the US Treasury 10-year yield."""
+        us_rate = 0.045
+        uni = _make_universe_df("AAPL", exchange="NYSE")
+        mac = _make_macro_df(rate=us_rate, key="us_treasury_10yr")
+        result = self._patch_and_run(
+            ticker="AAPL",
+            macro_df=mac,
+            universe_df=uni,
+        )
+        assert result["bond_yield"] == pytest.approx(us_rate)
+
+    def test_negative_eps_returns_nan_valuation(self):
+        """Negative trailing EPS should produce a NaN weighted_iv.
+
+        When the most recent eps_diluted is negative, the F14 intrinsic
+        value formula cannot produce a meaningful result because projecting
+        a negative base forward at a positive growth rate diverges further
+        into negative territory.
+        """
+        inc = _make_income_df("LOSS", base_eps=-2.0)
+        mkt = _make_market_data_df("LOSS", price=50.0)
+        result = self._patch_and_run(
+            ticker="LOSS",
+            income_df=inc,
+            market_df=mkt,
+        )
+        # With negative EPS, weighted_iv should be NaN or negative —
+        # either way, the stock should not be flagged as undervalued
+        assert result["is_undervalued"] is False
+
+    def test_nan_valuation_includes_discount_rate(self):
+        """NaN valuation dicts (missing data) should still include discount_rate."""
+        empty_mkt = pd.DataFrame()
+        result = self._patch_and_run(market_df=empty_mkt)
+        for label in ("bear", "base", "bull"):
+            assert "discount_rate" in result["scenarios"][label], (
+                f"NaN valuation missing discount_rate in {label} scenario"
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -1041,7 +1041,7 @@ class TestFullPipelineIntegration:
         data = json.loads(log_path.read_text(encoding="utf-8"))
         assert data["status"] == "success"
         assert data["mode"] == "reports"
-        assert data["elapsed_seconds"] == 15.3
+        assert data["runtime_seconds"] == 15.3
 
 
 # ===========================================================================
@@ -1127,3 +1127,95 @@ class TestDataIntegrity:
         scores = composite_df["composite_score"].dropna()
         assert (scores >= 0).all(), "Some scores below 0"
         assert (scores <= 100).all(), "Some scores above 100"
+
+    def test_recommendation_consistency(
+        self, integration_db: pathlib.Path,
+    ) -> None:
+        """Stocks with MoS ≥ 25% and composite_score ≥ 70 → BUY.
+
+        Verifies that ``generate_recommendation`` returns BUY when
+        both margin_of_safety and composite_score meet config thresholds,
+        and no critical data-quality flags are present.
+        """
+        from screener.filter_config_loader import get_threshold
+        from valuation_reports.recommendation import generate_recommendation
+
+        buy_min_mos = float(get_threshold("recommendations.buy_min_mos"))
+        buy_min_score = float(get_threshold("recommendations.buy_min_score"))
+
+        # Construct inputs that clearly exceed BUY thresholds
+        quality = {
+            "years_available": 10,
+            "substitutions_count": 0,
+            "drop": False,
+            "drop_reason": "",
+        }
+        valuation = {"weighted_iv": 200.0, "current_price": 100.0}
+
+        rec = generate_recommendation(
+            ticker="HQ01",
+            composite_score=buy_min_score + 5,
+            margin_of_safety=buy_min_mos + 0.05,
+            data_quality=quality,
+            valuation=valuation,
+        )
+        assert rec["recommendation"] == "BUY", (
+            f"Expected BUY for score={buy_min_score + 5}, "
+            f"MoS={buy_min_mos + 0.05:.0%}, got {rec['recommendation']}"
+        )
+
+        # Below thresholds → should NOT be BUY
+        rec_low = generate_recommendation(
+            ticker="LQ01",
+            composite_score=buy_min_score - 15,
+            margin_of_safety=buy_min_mos - 0.20,
+            data_quality=quality,
+            valuation=valuation,
+        )
+        assert rec_low["recommendation"] != "BUY"
+
+    def test_account_recommendation_all_shortlisted(
+        self, integration_db: pathlib.Path,
+    ) -> None:
+        """Account recommendations follow exchange logic for all tickers.
+
+        US-listed stocks (NYSE/NASDAQ) with dividend_yield ≥ threshold
+        → RRSP.  TSX-listed stocks → TFSA.
+        """
+        from valuation_reports.recommendation import recommend_account
+        from data_acquisition.store import read_table
+        from screener.filter_config_loader import get_threshold
+
+        rrsp_threshold = float(
+            get_threshold("recommendations.rrsp_us_dividend_yield_threshold"),
+        )
+
+        universe_df = read_table("universe")
+        market_df = read_table("market_data")
+
+        # Check every HQ ticker (all 10 should be shortlist-eligible)
+        hq_tickers = [f"HQ{i:02d}" for i in range(1, 11)]
+        for ticker in hq_tickers:
+            u_row = universe_df[universe_df["ticker"] == ticker].iloc[0]
+            m_row = market_df[market_df["ticker"] == ticker].iloc[0]
+            exchange = u_row["exchange"]
+            div_yield = float(m_row["dividend_yield"])
+
+            acct = recommend_account(
+                ticker=ticker,
+                exchange=exchange,
+                dividend_yield=div_yield,
+                expected_return=0.10,
+            )
+
+            if exchange in ("NYSE", "NASDAQ"):
+                if div_yield >= rrsp_threshold:
+                    assert acct["account"] == "RRSP", (
+                        f"{ticker} ({exchange}, yield={div_yield:.2%})"
+                        f" expected RRSP, got {acct['account']}"
+                    )
+            elif exchange == "TSX":
+                assert acct["account"] == "TFSA", (
+                    f"{ticker} ({exchange}) expected TFSA, "
+                    f"got {acct['account']}"
+                )

@@ -23,6 +23,7 @@ from valuation_reports.report_generator import (
     _determine_time_horizon,
     _safe_float,
     build_report_context,
+    generate_all_reports,
     render_deep_dive,
     render_summary,
 )
@@ -179,13 +180,15 @@ class TestBuildReportContext:
     """Test build_report_context with fully mocked DuckDB data."""
 
     REQUIRED_TOP_KEYS = {
-        "company_name", "ticker", "exchange", "report_date",
+        "company_name", "ticker", "exchange", "sector", "industry",
+        "report_date",
         "latest_fiscal_year", "composite_score", "iv_weighted",
         "current_price_usd", "margin_of_safety_pct",
         "recommendation", "confidence_level", "account_recommendation",
         "time_horizon_years", "critical_flags",
         "qualitative_enabled", "moat_assessment", "moat_indicators",
         "gross_margin_avg_10yr", "roe_avg_10yr",
+        "de_ratio_latest", "debt_payoff_years",
         "income_tests", "balance_tests", "cashflow_tests",
         "annual_income", "annual_balance", "annual_cashflow",
         "negative_equity_flag", "negative_equity_years",
@@ -204,6 +207,7 @@ class TestBuildReportContext:
         "earnings_yield", "bond_yield", "bond_yield_type",
         "earnings_yield_spread", "earnings_yield_interpretation",
         "sensitivity_data", "assumption_log", "bear_case_arguments",
+        "entry_strategy",
         "position_sizing_guidance", "sell_triggers",
         "account_reasoning", "data_quality",
     }
@@ -302,6 +306,42 @@ class TestBuildReportContext:
         # Sensitivity may be None if EPS can't be derived, or a dict
         if ctx["sensitivity_data"] is not None:
             assert "eps_sensitivity" in ctx["sensitivity_data"]
+
+    @patch("valuation_reports.report_generator.read_table")
+    @patch("valuation_reports.intrinsic_value.read_table")
+    def test_sector_and_industry_present(self, mock_iv_rt, mock_rg_rt):
+        """Sector and industry from universe row must be in context."""
+        mock_rg_rt.side_effect = _mock_read_table("AAPL")
+        mock_iv_rt.side_effect = _mock_read_table("AAPL")
+        ctx = build_report_context("AAPL")
+        assert ctx["sector"] == "Technology"
+        assert ctx["industry"] == "Consumer Electronics"
+
+    @patch("valuation_reports.report_generator.read_table")
+    @patch("valuation_reports.intrinsic_value.read_table")
+    def test_moat_defaults_disabled_without_api_key(self, mock_iv_rt, mock_rg_rt):
+        """Without ANTHROPIC_API_KEY, moat defaults to disabled/None."""
+        mock_rg_rt.side_effect = _mock_read_table("AAPL")
+        mock_iv_rt.side_effect = _mock_read_table("AAPL")
+        ctx = build_report_context("AAPL")
+        # enable_qualitative is false in config → moat stays None
+        assert ctx["qualitative_enabled"] is False
+        assert ctx["moat_assessment"] is None
+
+    @patch("valuation_reports.report_generator.enrich_report_with_moat")
+    @patch("valuation_reports.report_generator.read_table")
+    @patch("valuation_reports.intrinsic_value.read_table")
+    def test_enrich_report_with_moat_called(self, mock_iv_rt, mock_rg_rt, mock_enrich):
+        """build_report_context must call enrich_report_with_moat."""
+        mock_rg_rt.side_effect = _mock_read_table("AAPL")
+        mock_iv_rt.side_effect = _mock_read_table("AAPL")
+        # Make enrich_report_with_moat a passthrough
+        mock_enrich.side_effect = lambda ctx: ctx
+        ctx = build_report_context("AAPL")
+        mock_enrich.assert_called_once()
+        # Verify it was called with the context dict
+        call_arg = mock_enrich.call_args[0][0]
+        assert call_arg["ticker"] == "AAPL"
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +446,8 @@ class TestRenderSummary:
                 "exchange": "NASDAQ",
                 "sector": "Technology",
                 "composite_score": 82.5,
+                "iv_weighted": 195.50,
+                "current_price_usd": 150.00,
                 "margin_of_safety_pct": 0.233,
                 "recommendation": "BUY",
                 "confidence_level": "High",
@@ -420,6 +462,8 @@ class TestRenderSummary:
                 "exchange": "NYSE",
                 "sector": "Consumer Staples",
                 "composite_score": 78.3,
+                "iv_weighted": 68.25,
+                "current_price_usd": 57.30,
                 "margin_of_safety_pct": 0.185,
                 "recommendation": "HOLD",
                 "confidence_level": "High",
@@ -485,6 +529,119 @@ class TestRenderSummary:
         md = render_summary(self._mock_shortlist(), self._mock_screener_summary())
         assert "BUY" in md
         assert "HOLD" in md
+
+    def test_iv_and_price_columns_in_summary(self):
+        """IV and Price columns should render with values from shortlist."""
+        md = render_summary(self._mock_shortlist(), self._mock_screener_summary())
+        # Jinja2 round(2) drops trailing zeros: 195.50 → 195.5
+        assert "$195.5" in md   # AAPL iv_weighted
+        assert "$150.0" in md   # AAPL current_price_usd
+        assert "$68.25" in md   # KO iv_weighted
+        assert "$57.3" in md    # KO current_price_usd
+
+
+# ---------------------------------------------------------------------------
+# Tests: generate_all_reports
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateAllReports:
+    """Test generate_all_reports writes files to disk."""
+
+    @patch("valuation_reports.report_generator.read_table")
+    @patch("valuation_reports.intrinsic_value.read_table")
+    def test_writes_individual_reports(self, mock_iv_rt, mock_rg_rt, tmp_path):
+        mock_rg_rt.side_effect = _mock_read_table("AAPL")
+        mock_iv_rt.side_effect = _mock_read_table("AAPL")
+        shortlist = pd.DataFrame([{"ticker": "AAPL"}])
+        with patch(
+            "valuation_reports.report_generator.get_threshold",
+        ) as mock_gt:
+            # Return tmp_path for output.report_dir, delegate rest to real
+            from screener.filter_config_loader import get_threshold as real_gt
+            def _gt(key):
+                if key == "output.report_dir":
+                    return str(tmp_path)
+                return real_gt(key)
+            mock_gt.side_effect = _gt
+            paths = generate_all_reports(shortlist)
+        assert len(paths) == 1
+        assert paths[0].name == "AAPL_analysis.md"
+        assert paths[0].exists()
+        content = paths[0].read_text()
+        assert "AAPL" in content
+
+    @patch("valuation_reports.report_generator.read_table")
+    @patch("valuation_reports.intrinsic_value.read_table")
+    def test_writes_summary_when_provided(self, mock_iv_rt, mock_rg_rt, tmp_path):
+        mock_rg_rt.side_effect = _mock_read_table("AAPL")
+        mock_iv_rt.side_effect = _mock_read_table("AAPL")
+        shortlist = pd.DataFrame([{
+            "ticker": "AAPL",
+            "company_name": "Apple Inc.",
+            "exchange": "NASDAQ",
+            "sector": "Technology",
+            "composite_score": 82.5,
+            "iv_weighted": 195.50,
+            "current_price_usd": 150.00,
+            "margin_of_safety_pct": 0.233,
+            "recommendation": "BUY",
+            "confidence_level": "High",
+            "account_recommendation": "Either",
+            "gross_margin_avg_10yr": 0.432,
+            "roe_avg_10yr": 0.285,
+            "eps_cagr_10yr": 0.123,
+        }])
+        summary = {
+            "universe_size": 2500,
+            "after_exclusions": 1800,
+            "passed_hard_filters": 120,
+            "filter_stats": {},
+            "macro": {"us_treasury_10yr": 0.04},
+        }
+        with patch(
+            "valuation_reports.report_generator.get_threshold",
+        ) as mock_gt:
+            from screener.filter_config_loader import get_threshold as real_gt
+            def _gt(key):
+                if key == "output.report_dir":
+                    return str(tmp_path)
+                return real_gt(key)
+            mock_gt.side_effect = _gt
+            paths = generate_all_reports(shortlist, screener_summary=summary)
+        # Should have 1 individual + 1 summary
+        assert len(paths) == 2
+        summary_path = tmp_path / "summary.md"
+        assert summary_path.exists()
+        assert "AAPL" in summary_path.read_text()
+
+    @patch("valuation_reports.report_generator.read_table")
+    @patch("valuation_reports.intrinsic_value.read_table")
+    def test_continues_on_ticker_failure(self, mock_iv_rt, mock_rg_rt, tmp_path):
+        """If one ticker fails, the rest still get generated."""
+        def _read_table_bad(table_name, where=None):
+            if where and "BAD" in where:
+                raise RuntimeError("Simulated data error")
+            return _mock_read_table("AAPL")(table_name, where)
+        mock_rg_rt.side_effect = _read_table_bad
+        mock_iv_rt.side_effect = _read_table_bad
+        shortlist = pd.DataFrame([
+            {"ticker": "BAD"},
+            {"ticker": "AAPL"},
+        ])
+        with patch(
+            "valuation_reports.report_generator.get_threshold",
+        ) as mock_gt:
+            from screener.filter_config_loader import get_threshold as real_gt
+            def _gt(key):
+                if key == "output.report_dir":
+                    return str(tmp_path)
+                return real_gt(key)
+            mock_gt.side_effect = _gt
+            paths = generate_all_reports(shortlist)
+        # BAD should fail but AAPL should succeed
+        assert len(paths) == 1
+        assert paths[0].name == "AAPL_analysis.md"
 
 
 # ---------------------------------------------------------------------------

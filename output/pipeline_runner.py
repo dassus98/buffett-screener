@@ -383,9 +383,13 @@ def _write_run_log(
     elapsed_seconds: float,
     stages_run: list[str],
     report_paths: list[pathlib.Path] | None,
+    pipeline_stats: dict[str, int] | None = None,
     error: str | None = None,
 ) -> pathlib.Path:
     """Write a JSON run log to the report directory.
+
+    The log captures both CLI arguments and pipeline statistics for
+    downstream auditing and idempotency checks.
 
     Parameters
     ----------
@@ -397,6 +401,9 @@ def _write_run_log(
         List of stage names that were executed.
     report_paths:
         Paths to generated reports (``None`` if dashboard mode).
+    pipeline_stats:
+        Dict with ``universe_size``, ``tier1_survivors``, ``shortlisted``,
+        ``reports_generated`` (int).  Populated by ``run_pipeline``.
     error:
         Error message if the pipeline failed (``None`` on success).
 
@@ -413,11 +420,20 @@ def _write_run_log(
     report_dir = _PROJECT_ROOT / report_dir_str
     report_dir.mkdir(parents=True, exist_ok=True)
 
+    stats = pipeline_stats or {}
+
     log_data: dict[str, Any] = {
         "timestamp": datetime.datetime.now(
             tz=datetime.timezone.utc,
         ).isoformat(),
         "mode": args.mode,
+        # Pipeline statistics (per spec)
+        "universe_size": stats.get("universe_size", 0),
+        "tier1_survivors": stats.get("tier1_survivors", 0),
+        "shortlisted": stats.get("shortlisted", 0),
+        "reports_generated": stats.get("reports_generated", 0),
+        "runtime_seconds": round(elapsed_seconds, 2),
+        # CLI parameters
         "top_n": args.top,
         "exchange": args.exchange,
         "skip_acquisition": args.skip_acquisition,
@@ -425,9 +441,8 @@ def _write_run_log(
         "no_cache": args.no_cache,
         "no_moat": args.no_moat,
         "verbose": args.verbose,
-        "elapsed_seconds": round(elapsed_seconds, 2),
         "stages_run": stages_run,
-        "reports_generated": (
+        "report_files": (
             [str(p) for p in report_paths] if report_paths else []
         ),
         "status": "error" if error else "success",
@@ -462,6 +477,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
     report_paths: list[pathlib.Path] | None = None
     error_msg: str | None = None
 
+    # Pipeline statistics for the run log (per spec)
+    pipeline_stats: dict[str, int] = {
+        "universe_size": 0,
+        "tier1_survivors": 0,
+        "shortlisted": 0,
+        "reports_generated": 0,
+    }
+
     configure_logging(verbose=args.verbose)
     logger.info("Pipeline starting (mode=%s)", args.mode)
 
@@ -477,6 +500,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         if not args.skip_acquisition:
             acq_result = _run_stage_1(use_cache=not args.no_cache)
             total_universe = acq_result["universe_size"]
+            pipeline_stats["universe_size"] = total_universe
             stages_run.append("data_acquisition")
         else:
             logger.info("Stage 1 skipped (--skip-acquisition).")
@@ -485,6 +509,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         composite_df = pd.DataFrame()
         if not args.skip_metrics:
             composite_df = _run_stage_2()
+            pipeline_stats["tier1_survivors"] = len(composite_df)
             stages_run.append("metrics_engine")
         else:
             logger.info("Stage 2 skipped (--skip-metrics).")
@@ -496,6 +521,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
             exchange_filter=args.exchange,
             total_universe=total_universe,
         )
+        pipeline_stats["shortlisted"] = len(shortlist_df)
         stages_run.append("screening")
 
         # --- Stage 4: Output ---
@@ -503,7 +529,18 @@ def run_pipeline(args: argparse.Namespace) -> None:
             report_paths = _run_stage_4_reports(
                 shortlist_df, screener_summary,
             )
+            pipeline_stats["reports_generated"] = (
+                len(report_paths) if report_paths else 0
+            )
             stages_run.append("reports")
+
+            # Explicit print for CLI visibility (per spec)
+            try:
+                report_dir_str = str(get_threshold("output.report_dir"))
+            except (KeyError, ValueError):
+                report_dir_str = "data/reports"
+            logger.info("Reports generated in %s/", report_dir_str)
+
         elif args.mode == "dashboard":
             _run_stage_4_dashboard()
             stages_run.append("dashboard")
@@ -518,6 +555,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         elapsed_seconds=elapsed,
         stages_run=stages_run,
         report_paths=report_paths,
+        pipeline_stats=pipeline_stats,
         error=error_msg,
     )
 

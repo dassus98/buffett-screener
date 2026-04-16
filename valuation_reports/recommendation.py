@@ -22,6 +22,8 @@ Downstream consumers:
     - ``valuation_reports.report_generator``
       → reads ``recommendation``, ``confidence``, ``reasoning``,
         ``account_recommendation``, ``sell_triggers``, ``entry_strategy``.
+      → calls ``apply_sell_signal_override`` after sell signals are
+        generated to enforce REPORT_SPEC §5 override rule.
 
 Config dependencies (all via ``get_threshold``):
     - ``recommendations.buy_min_mos``          (default 0.25)
@@ -330,7 +332,24 @@ def recommend_account(
                     "not recognised as a pension account under the treaty."
                 ),
             }
-        # No significant dividend — slight TFSA preference
+        # --- No significant dividend: check expected return ---
+        #     Per REPORT_SPEC §3: "High expected return, long horizon →
+        #     TFSA if room available."  When expected return ≥ the config
+        #     threshold, the larger terminal value makes TFSA's fully
+        #     tax-free compounding more valuable.
+        exp_ret = expected_return if not math.isnan(expected_return) else 0.0
+        if exp_ret >= tfsa_return_threshold:
+            return {
+                "account": "TFSA",
+                "reasoning": (
+                    f"No withholding tax issue (minimal or no dividend). "
+                    f"Expected return ({exp_ret:.0%}) meets the high-"
+                    f"growth threshold — larger terminal value makes "
+                    f"TFSA's fully tax-free compounding more valuable "
+                    f"than RRSP's deferral."
+                ),
+            }
+        # Moderate expected return — slight TFSA preference
         return {
             "account": "Either",
             "reasoning": (
@@ -451,22 +470,17 @@ def generate_sell_signals(
             ),
         )
 
-    # --- Step 4: Leverage spike (D/E) ---
+    # --- Step 4: Leverage spike (D/E OR debt payoff years) ---
+    #     Per REPORT_SPEC §5: "D/E exceeds 1.0, OR debt payoff years
+    #     exceed 5" — either condition is sufficient to trigger.
     de = metrics_summary.get("de_ratio_latest", float("nan"))
+    debt_yrs = metrics_summary.get("debt_payoff_years", float("nan"))
     signals.append(
-        _evaluate_ceiling_signal(
-            signal="leverage_spike",
-            current=de,
-            threshold=max_de,
-            description_ok="Debt-to-equity ratio is within acceptable range.",
-            description_warn=(
-                f"D/E ratio ({de:.2f}) is approaching the sell-signal "
-                f"ceiling of {max_de:.1f}. Monitor leverage trend."
-            ),
-            description_triggered=(
-                f"D/E ratio ({de:.2f}) exceeds the sell-signal ceiling "
-                f"of {max_de:.1f}. Leverage is excessive."
-            ),
+        _evaluate_leverage_signal(
+            de_ratio=de,
+            max_de=max_de,
+            debt_payoff=debt_yrs,
+            max_debt_payoff=max_debt_yrs,
         ),
     )
 
@@ -604,6 +618,59 @@ def generate_entry_strategy(
     }
 
 
+def apply_sell_signal_override(
+    recommendation: dict[str, Any],
+    sell_signals: list[dict[str, Any]],
+    ticker: str = "",
+) -> dict[str, Any]:
+    """Override recommendation to PASS if any sell signal is TRIGGERED.
+
+    Per REPORT_SPEC §5: "Triggered sell signals cause the recommendation
+    to be overridden to PASS regardless of MoS or composite score."
+
+    Parameters
+    ----------
+    recommendation:
+        Dict from ``generate_recommendation`` with keys
+        ``recommendation``, ``confidence``, ``reasoning``.
+    sell_signals:
+        List of signal dicts from ``generate_sell_signals``.
+    ticker:
+        Ticker symbol (for logging).
+
+    Returns
+    -------
+    dict
+        Original dict if no triggered signals; otherwise a copy with
+        ``recommendation`` set to ``"PASS"`` and ``reasoning`` updated.
+    """
+    triggered = [
+        s for s in sell_signals if s.get("status") == "TRIGGERED"
+    ]
+
+    if not triggered:
+        return recommendation
+
+    # Build a summary of which signals fired
+    names = [s["signal"] for s in triggered]
+    override_reason = (
+        f"Recommendation overridden to PASS — sell signal(s) triggered: "
+        f"{', '.join(names)}. See sell triggers table for details."
+    )
+
+    logger.warning(
+        "[%s] Recommendation overridden from %s to PASS due to "
+        "triggered sell signal(s): %s",
+        ticker, recommendation["recommendation"], ", ".join(names),
+    )
+
+    return {
+        "recommendation": "PASS",
+        "confidence": recommendation["confidence"],
+        "reasoning": override_reason,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Private signal evaluation helpers
 # ---------------------------------------------------------------------------
@@ -684,6 +751,94 @@ def _evaluate_ceiling_signal(
         "signal": signal,
         "current_value": float(current),
         "threshold": float(threshold),
+        "status": status,
+        "description": desc,
+    }
+
+
+def _evaluate_leverage_signal(
+    de_ratio: float,
+    max_de: float,
+    debt_payoff: float,
+    max_debt_payoff: float,
+) -> dict[str, Any]:
+    """Evaluate compound leverage signal: D/E OR debt payoff years.
+
+    Per REPORT_SPEC §5 the leverage spike signal triggers when *either*
+    D/E exceeds ``max_de`` OR debt payoff years exceed ``max_debt_payoff``.
+    WARNING fires when either metric is within 20 % of its threshold.
+
+    Returns a signal dict with status OK / WARNING / TRIGGERED.
+    """
+    de_nan = math.isnan(de_ratio) or math.isnan(max_de)
+    dp_nan = math.isnan(debt_payoff) or math.isnan(max_debt_payoff)
+
+    # --- Both unavailable: cannot evaluate ---
+    if de_nan and dp_nan:
+        return {
+            "signal": "leverage_spike",
+            "current_value": None,
+            "threshold": None,
+            "status": "OK",
+            "description": "leverage_spike: data unavailable.",
+        }
+
+    # --- Determine status for each axis independently ---
+    de_triggered = (not de_nan) and de_ratio > max_de
+    de_warning = (not de_nan) and _is_approaching(
+        de_ratio, max_de, lower_is_bad=False,
+    )
+    dp_triggered = (not dp_nan) and debt_payoff > max_debt_payoff
+    dp_warning = (not dp_nan) and _is_approaching(
+        debt_payoff, max_debt_payoff, lower_is_bad=False,
+    )
+
+    # --- Combine: either axis can elevate the overall status ---
+    if de_triggered or dp_triggered:
+        status = "TRIGGERED"
+        parts: list[str] = []
+        if de_triggered:
+            parts.append(
+                f"D/E ratio ({de_ratio:.2f}) exceeds the "
+                f"sell-signal ceiling of {max_de:.1f}",
+            )
+        if dp_triggered:
+            parts.append(
+                f"Debt payoff years ({debt_payoff:.1f}) exceeds the "
+                f"sell-signal ceiling of {max_debt_payoff:.0f}",
+            )
+        desc = ". ".join(parts) + ". Leverage is excessive."
+    elif de_warning or dp_warning:
+        status = "WARNING"
+        parts = []
+        if de_warning:
+            parts.append(
+                f"D/E ratio ({de_ratio:.2f}) is approaching the "
+                f"ceiling of {max_de:.1f}",
+            )
+        if dp_warning:
+            parts.append(
+                f"Debt payoff years ({debt_payoff:.1f}) is approaching "
+                f"the ceiling of {max_debt_payoff:.0f}",
+            )
+        desc = ". ".join(parts) + ". Monitor leverage trend."
+    else:
+        status = "OK"
+        desc = "Debt-to-equity ratio and debt payoff years are within acceptable range."
+
+    # Report the more concerning metric as current_value/threshold
+    # (D/E takes precedence when both are available)
+    if not de_nan:
+        cur_val = float(de_ratio)
+        thresh = float(max_de)
+    else:
+        cur_val = float(debt_payoff)
+        thresh = float(max_debt_payoff)
+
+    return {
+        "signal": "leverage_spike",
+        "current_value": cur_val,
+        "threshold": thresh,
         "status": status,
         "description": desc,
     }

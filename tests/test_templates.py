@@ -272,6 +272,15 @@ def _deep_dive_context() -> dict:
             },
         ],
         # Investment Strategy
+        "entry_strategy": {
+            "current_price": 150.00,
+            "ideal_entry": 130.92,
+            "discount_needed_pct": 0.127,
+            "strategy": (
+                "Current price of $150.00 is 14.6% above the ideal entry "
+                "of $130.92. Wait for a pullback or accumulate in tranches."
+            ),
+        },
         "position_sizing_guidance": (
             "High confidence, score >= 80: Up to 8-10% of portfolio."
         ),
@@ -324,6 +333,8 @@ def _summary_context() -> dict:
                 "company_name": "Apple Inc.",
                 "exchange": "NASDAQ",
                 "composite_score": 82.5,
+                "iv_weighted": 195.40,
+                "current_price_usd": 150.00,
                 "margin_of_safety_pct": 0.233,
                 "recommendation": "BUY",
                 "confidence_level": "High",
@@ -338,6 +349,8 @@ def _summary_context() -> dict:
                 "company_name": "Coca-Cola Co.",
                 "exchange": "NYSE",
                 "composite_score": 78.3,
+                "iv_weighted": 62.50,
+                "current_price_usd": 55.00,
                 "margin_of_safety_pct": 0.185,
                 "recommendation": "HOLD",
                 "confidence_level": "High",
@@ -352,6 +365,8 @@ def _summary_context() -> dict:
                 "company_name": "Royal Bank of Canada",
                 "exchange": "TSX",
                 "composite_score": 71.2,
+                "iv_weighted": 145.80,
+                "current_price_usd": 125.00,
                 "margin_of_safety_pct": 0.142,
                 "recommendation": "HOLD",
                 "confidence_level": "Moderate",
@@ -611,6 +626,40 @@ class TestDeepDiveTemplate:
         output = tmpl.render(**ctx)
         assert "GoC 10yr (TSX security)" in output
 
+    def test_entry_strategy_narrative(self, jinja_env: jinja2.Environment):
+        """Entry strategy narrative is rendered in Investment Strategy section."""
+        tmpl = jinja_env.get_template("deep_dive_template.md")
+        output = tmpl.render(**_deep_dive_context())
+        assert "above the ideal entry" in output
+        assert "130.92" in output  # ideal_entry price
+
+    def test_entry_strategy_missing_falls_back(self, jinja_env: jinja2.Environment):
+        """When entry_strategy is None/missing, falls back to buy_below_moderate."""
+        ctx = _deep_dive_context()
+        ctx["entry_strategy"] = None
+        tmpl = jinja_env.get_template("deep_dive_template.md")
+        output = tmpl.render(**ctx)
+        assert "Entry Price Target" in output
+        assert "130.92" in output  # buy_below_moderate
+
+    def test_sensitivity_partial_eps_only(self, jinja_env: jinja2.Environment):
+        """Only EPS sensitivity populated — others hidden."""
+        ctx = _deep_dive_context()
+        ctx["sensitivity_data"] = {
+            "eps_sensitivity": [
+                (0.0861, 120.50, 0.196),
+                (0.1230, 195.40, 0.232),
+                (0.1599, 298.50, 0.497),
+            ],
+            "pe_sensitivity": [],
+            "discount_sensitivity": [],
+        }
+        tmpl = jinja_env.get_template("deep_dive_template.md")
+        output = tmpl.render(**ctx)
+        assert "EPS Growth Rate Sensitivity" in output
+        assert "Terminal P/E Sensitivity" not in output
+        assert "Discount Rate Sensitivity" not in output
+
     def test_disclaimer_present(self, jinja_env: jinja2.Environment):
         tmpl = jinja_env.get_template("deep_dive_template.md")
         output = tmpl.render(**_deep_dive_context())
@@ -709,6 +758,15 @@ class TestSummaryTableTemplate:
         tmpl = jinja_env.get_template("summary_table_template.md")
         output = tmpl.render(**_summary_context())
         assert "not investment advice" in output
+
+    def test_iv_and_price_columns_present(self, jinja_env: jinja2.Environment):
+        """Summary table includes IV and Price columns."""
+        tmpl = jinja_env.get_template("summary_table_template.md")
+        output = tmpl.render(**_summary_context())
+        assert "| IV |" in output
+        assert "| Price |" in output
+        assert "$195.4" in output   # AAPL iv_weighted
+        assert "$150.0" in output   # AAPL current_price_usd
 
     def test_filter_stats_hidden_when_empty(self, jinja_env: jinja2.Environment):
         ctx = _summary_context()

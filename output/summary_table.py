@@ -10,8 +10,9 @@ Data Lineage Contract
 Upstream producers:
     - ``screener.composite_ranker.generate_shortlist``
       → ``shortlist_df`` with columns: ``ticker``, ``composite_score``,
-        ``rank``, ``score_category``, and optional ``company_name``,
-        ``sector``, ``exchange``.
+        ``rank``.  Optional enrichment columns: ``iv_weighted``,
+        ``current_price_usd``, ``margin_of_safety_pct``,
+        ``recommendation``.
 
 Downstream consumers:
     - Terminal output (stdout) for operator review.
@@ -128,11 +129,58 @@ def _build_separator(col_widths: dict[str, int]) -> str:
     return "-+-".join("-" * w for w in col_widths.values())
 
 
+def _safe_dollar(value: Any) -> str:
+    """Format a dollar amount with two decimal places.
+
+    Parameters
+    ----------
+    value:
+        Dollar value.
+
+    Returns
+    -------
+    str
+        Formatted price like ``"$150.25"`` or ``"—"`` if unavailable.
+    """
+    try:
+        v = float(value)
+        if math.isnan(v):
+            return "—"
+        return f"${v:.2f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _safe_pct(value: Any) -> str:
+    """Format a decimal fraction as a percentage with one decimal place.
+
+    Parameters
+    ----------
+    value:
+        Decimal fraction (e.g. 0.25 → ``"25.0%"``).
+
+    Returns
+    -------
+    str
+        Formatted percentage or ``"—"`` if unavailable.
+    """
+    try:
+        v = float(value)
+        if math.isnan(v):
+            return "—"
+        return f"{v * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def _build_row(
     row: pd.Series,
     col_widths: dict[str, int],
 ) -> str:
     """Format a single data row from a shortlist DataFrame.
+
+    Columns: Rank, Ticker, Score, IV, Price, MoS%, Rec — matching the
+    spec in the task instructions.
 
     Parameters
     ----------
@@ -148,20 +196,20 @@ def _build_row(
     """
     rank_val = row.get("rank", "—")
     ticker_val = row.get("ticker", "—")
-    name_val = row.get("company_name", "—")
     score_val = _safe_score(row.get("composite_score"))
-    category_val = row.get("score_category", "—")
-    sector_val = row.get("sector", "—")
-    exchange_val = row.get("exchange", "—")
+    iv_val = _safe_dollar(row.get("iv_weighted"))
+    price_val = _safe_dollar(row.get("current_price_usd"))
+    mos_val = _safe_pct(row.get("margin_of_safety_pct"))
+    rec_val = row.get("recommendation", "—")
 
     parts: list[str] = [
         _safe_str(rank_val, col_widths["Rank"], ">"),
         _safe_str(ticker_val, col_widths["Ticker"]),
-        _safe_str(name_val, col_widths["Company"]),
         _safe_str(score_val, col_widths["Score"], ">"),
-        _safe_str(category_val, col_widths["Category"]),
-        _safe_str(sector_val, col_widths["Sector"]),
-        _safe_str(exchange_val, col_widths["Exch"]),
+        _safe_str(iv_val, col_widths["IV"], ">"),
+        _safe_str(price_val, col_widths["Price"], ">"),
+        _safe_str(mos_val, col_widths["MoS%"], ">"),
+        _safe_str(rec_val, col_widths["Rec"]),
     ]
     return " | ".join(parts)
 
@@ -185,8 +233,9 @@ def print_summary_to_console(
     ----------
     shortlist_df:
         Shortlisted securities DataFrame.  Expected columns:
-        ``ticker``, ``composite_score``, ``rank``, ``score_category``.
-        Optional: ``company_name``, ``sector``, ``exchange``.
+        ``ticker``, ``composite_score``, ``rank``.
+        Optional: ``iv_weighted``, ``current_price_usd``,
+        ``margin_of_safety_pct``, ``recommendation``.
     max_rows:
         Maximum rows to display (default 20).
     output:
@@ -199,15 +248,15 @@ def print_summary_to_console(
         output.write("\nNo stocks in shortlist.\n")
         return
 
-    # Column widths
+    # Column widths — matches spec: Rank, Ticker, Score, IV, Price, MoS%, Rec
     col_widths = {
         "Rank": 4,
         "Ticker": 8,
-        "Company": 25,
         "Score": 6,
-        "Category": 12,
-        "Sector": 20,
-        "Exch": 6,
+        "IV": 10,
+        "Price": 10,
+        "MoS%": 7,
+        "Rec": 6,
     }
 
     # Title

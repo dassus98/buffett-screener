@@ -1,3 +1,18 @@
+{#- ====================================================================
+    Portfolio-Level Summary Report Template (Jinja2)
+
+    Rendered by: valuation_reports/report_generator.py → render_summary()
+    Spec:        docs/REPORT_SPEC.md §6
+    Context:     top_n, run_date, universe_size, after_exclusions,
+                 passed_hard_filters, shortlist_count, macro, rows,
+                 filter_stats, sector_summary
+
+    Each row dict contains: rank, ticker, company_name, exchange,
+    composite_score, iv_weighted, current_price_usd,
+    margin_of_safety_pct, recommendation, confidence_level,
+    account_recommendation, gross_margin_avg_10yr, roe_avg_10yr,
+    eps_cagr_10yr.
+    ==================================================================== -#}
 # Buffett Screener — Top {{ top_n }} Summary
 
 Generated: {{ run_date }} | Universe: {{ universe_size }} tickers screened |
@@ -5,6 +20,7 @@ Passed hard filters: {{ passed_hard_filters }}
 
 ---
 
+{#- Macro context: bond yields and exchange rate -#}
 ## Macro Context
 
 | Indicator | Value |
@@ -19,16 +35,18 @@ Passed hard filters: {{ passed_hard_filters }}
 
 ---
 
+{#- Ranked shortlist table with IV and Price columns -#}
 ## Shortlisted Securities
 
-| Rank | Ticker | Company | Exchange | Score | MoS | Rec. | Confidence | Account | Gross Margin | ROE (10yr) | EPS CAGR |
-|---|---|---|---|---|---|---|---|---|---|---|---|
+| Rank | Ticker | Company | Exchange | Score | IV | Price | MoS | Rec. | Confidence | Account | Gross Margin | ROE (10yr) | EPS CAGR |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 {% for row in rows %}
-| {{ row.rank }} | {{ row.ticker }} | {{ row.company_name }} | {{ row.exchange }} | {{ row.composite_score | round(1) }} | {{ (row.margin_of_safety_pct * 100) | round(1) }}% | {{ row.recommendation }} | {{ row.confidence_level }} | {{ row.account_recommendation }} | {{ (row.gross_margin_avg_10yr * 100) | round(1) }}% | {{ (row.roe_avg_10yr * 100) | round(1) }}% | {{ (row.eps_cagr_10yr * 100) | round(1) }}% |
+| {{ row.rank }} | {{ row.ticker }} | {{ row.company_name }} | {{ row.exchange }} | {{ row.composite_score | round(1) }} | ${{ row.iv_weighted | round(2) }} | ${{ row.current_price_usd | round(2) }} | {{ (row.margin_of_safety_pct * 100) | round(1) }}% | {{ row.recommendation }} | {{ row.confidence_level }} | {{ row.account_recommendation }} | {{ (row.gross_margin_avg_10yr * 100) | round(1) }}% | {{ (row.roe_avg_10yr * 100) | round(1) }}% | {{ (row.eps_cagr_10yr * 100) | round(1) }}% |
 {% endfor %}
 
 ---
 
+{#- Screener funnel statistics -#}
 ## Screener Statistics
 
 | Stage | Tickers Remaining |
@@ -47,6 +65,7 @@ Passed hard filters: {{ passed_hard_filters }}
 
 ---
 
+{#- Top sectors among shortlisted securities -#}
 {% if sector_summary %}
 ## Top Sectors Represented
 

@@ -1159,7 +1159,7 @@ class TestComputeIntrinsicValue:
     def test_result_dict_keys_present(self):
         result = compute_intrinsic_value(5.0, 0.10, _make_pe_series(), 100.0, 0.04)
         assert set(result.keys()) == {"bear", "base", "bull", "weighted_iv", "meets_hurdle"}
-        scenario_keys = {"growth", "pe", "projected_price", "present_value", "annual_return", "probability"}
+        scenario_keys = {"growth", "pe", "discount_rate", "projected_price", "present_value", "annual_return", "probability"}
         assert set(result["bear"].keys()) == scenario_keys
 
 

@@ -30,6 +30,8 @@ from output.pipeline_runner import (
     run_pipeline,
 )
 from output.summary_table import (
+    _safe_dollar,
+    _safe_pct,
     _safe_score,
     _safe_str,
     print_summary_to_console,
@@ -59,11 +61,11 @@ def _make_shortlist_df(n: int = 5) -> pd.DataFrame:
             "ticker": tickers,
             "composite_score": [90 - i * 5 for i in range(n)],
             "rank": list(range(1, n + 1)),
-            "score_category": ["Strong Buy"] * min(2, n)
-            + ["Buy"] * max(0, n - 2),
-            "company_name": [f"Company {t}" for t in tickers],
-            "sector": ["Technology"] * n,
-            "exchange": ["NYSE"] * n,
+            "iv_weighted": [200.0 - i * 10 for i in range(n)],
+            "current_price_usd": [150.0 - i * 5 for i in range(n)],
+            "margin_of_safety_pct": [0.25 + i * 0.05 for i in range(n)],
+            "recommendation": ["Buy"] * min(3, n)
+            + ["Hold"] * max(0, n - 3),
         },
     )
 
@@ -236,7 +238,7 @@ class TestWriteRunLog:
     def test_writes_json_file(
         self, mock_gt: MagicMock, tmp_path: pathlib.Path,
     ) -> None:
-        """_write_run_log creates a valid JSON file."""
+        """_write_run_log creates a valid JSON file with pipeline stats."""
         mock_gt.return_value = str(tmp_path)
 
         # Patch _PROJECT_ROOT so the path resolves correctly
@@ -251,14 +253,25 @@ class TestWriteRunLog:
                 elapsed_seconds=42.5,
                 stages_run=["data_acquisition", "metrics_engine"],
                 report_paths=[pathlib.Path("summary.md")],
+                pipeline_stats={
+                    "universe_size": 500,
+                    "tier1_survivors": 200,
+                    "shortlisted": 30,
+                    "reports_generated": 30,
+                },
             )
 
         assert log_path.exists()
         data = json.loads(log_path.read_text(encoding="utf-8"))
         assert data["mode"] == "reports"
-        assert data["elapsed_seconds"] == 42.5
+        assert data["runtime_seconds"] == 42.5
         assert data["status"] == "success"
         assert "data_acquisition" in data["stages_run"]
+        # Verify pipeline statistics keys
+        assert data["universe_size"] == 500
+        assert data["tier1_survivors"] == 200
+        assert data["shortlisted"] == 30
+        assert data["reports_generated"] == 30
 
     @patch("output.pipeline_runner.get_threshold")
     def test_error_status_on_failure(
@@ -284,6 +297,9 @@ class TestWriteRunLog:
         data = json.loads(log_path.read_text(encoding="utf-8"))
         assert data["status"] == "error"
         assert data["error"] == "Test error"
+        # Default pipeline_stats when None passed
+        assert data["universe_size"] == 0
+        assert data["reports_generated"] == 0
 
 
 # ===========================================================================
@@ -417,6 +433,10 @@ class TestPrintSummaryToConsole:
         assert "Rank" in output
         assert "Ticker" in output
         assert "Score" in output
+        assert "IV" in output
+        assert "Price" in output
+        assert "MoS%" in output
+        assert "Rec" in output
 
     def test_basic_output_contains_tickers(self) -> None:
         """Output contains ticker symbols from the DataFrame."""
@@ -697,3 +717,53 @@ class TestFormatSection:
         """Sections end with a horizontal rule."""
         result = _format_section("content", ticker="X")
         assert "---" in result
+
+
+# ===========================================================================
+# TestSafeDollar
+# ===========================================================================
+
+
+class TestSafeDollar:
+    """Tests for _safe_dollar helper."""
+
+    def test_valid_float(self) -> None:
+        """Valid float formats as dollar amount."""
+        assert _safe_dollar(150.25) == "$150.25"
+
+    def test_nan_returns_dash(self) -> None:
+        """NaN returns '—'."""
+        assert _safe_dollar(float("nan")) == "—"
+
+    def test_none_returns_dash(self) -> None:
+        """None returns '—'."""
+        assert _safe_dollar(None) == "—"
+
+    def test_string_returns_dash(self) -> None:
+        """Non-numeric string returns '—'."""
+        assert _safe_dollar("abc") == "—"
+
+
+# ===========================================================================
+# TestSafePct
+# ===========================================================================
+
+
+class TestSafePct:
+    """Tests for _safe_pct helper."""
+
+    def test_valid_fraction(self) -> None:
+        """Decimal fraction formats as percentage."""
+        assert _safe_pct(0.25) == "25.0%"
+
+    def test_nan_returns_dash(self) -> None:
+        """NaN returns '—'."""
+        assert _safe_pct(float("nan")) == "—"
+
+    def test_none_returns_dash(self) -> None:
+        """None returns '—'."""
+        assert _safe_pct(None) == "—"
+
+    def test_string_returns_dash(self) -> None:
+        """Non-numeric string returns '—'."""
+        assert _safe_pct("abc") == "—"
