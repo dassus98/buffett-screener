@@ -150,8 +150,8 @@ _FAIL_OVERRIDES: dict[str, dict[str, object]] = {
     "FAIL_ROE":  {"avg_roe": 0.10},            # below min_avg_roe (0.15)
     "FAIL_EPS":  {"eps_cagr": -0.02},           # not strictly > min_eps_cagr (0.0)
     "FAIL_DEBT": {"debt_payoff_years": 8.0},    # above max_debt_payoff_years (5.0)
-    "FAIL_EARN": {"profitable_years": 5},        # below min_profitable_years (8)
-    "FAIL_DATA": {"years_available": 3},         # below min_history_years (8)
+    "FAIL_EARN": {"profitable_years": 2},        # below min_profitable_years (3)
+    "FAIL_DATA": {"years_available": 3},         # below min_history_years (4)
 }
 
 _SECTOR_MAP: dict[str, tuple[str, str]] = {
@@ -417,7 +417,7 @@ class TestHardFilterStage:
         assert not bool(row.iloc[0]["pass_fail"])
 
     def test_fail_earn_fails_earnings_filter(self, pipeline: dict) -> None:
-        """FAIL_EARN (5 profitable years) fails earnings_consistency."""
+        """FAIL_EARN (2 profitable years) fails earnings_consistency."""
         log = pipeline["filter_log_df"]
         row = log[
             (log["ticker"] == "FAIL_EARN")
@@ -427,7 +427,7 @@ class TestHardFilterStage:
         assert not bool(row.iloc[0]["pass_fail"])
 
     def test_fail_data_fails_data_sufficiency_filter(self, pipeline: dict) -> None:
-        """FAIL_DATA (3 years available) fails data_sufficiency."""
+        """FAIL_DATA (3 years available, below min_history_years=4) fails data_sufficiency."""
         log = pipeline["filter_log_df"]
         row = log[
             (log["ticker"] == "FAIL_DATA")

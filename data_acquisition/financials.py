@@ -252,6 +252,29 @@ def _fetch_statements_yfinance(
             df = df.reset_index(drop=True)
             df["calendarYear"] = dates.year.astype(str)
             df["date"] = dates.strftime("%Y-%m-%d")
+
+            # Drop rows where almost all financial data is NaN.
+            # yfinance often returns a sparse stub for the oldest year
+            # (e.g. only 6 of 39 fields populated for 2021).  These rows
+            # inflate years_available but contribute nothing to metrics,
+            # and generate hundreds of spurious WARNING logs.
+            fin_cols = [c for c in df.columns if c not in ("calendarYear", "date")]
+            non_null_counts = df[fin_cols].notna().sum(axis=1)
+            min_fields = max(len(fin_cols) // 4, 1)  # at least 25% of fields
+            sparse_mask = non_null_counts < min_fields
+            if sparse_mask.any():
+                dropped_years = df.loc[sparse_mask, "calendarYear"].tolist()
+                logger.info(
+                    "yfinance: dropping %d sparse row(s) for %s/%s (years: %s, "
+                    "non-null fields < %d).",
+                    sparse_mask.sum(), ticker, stmt_type, dropped_years, min_fields,
+                )
+                df = df.loc[~sparse_mask].reset_index(drop=True)
+
+            if df.empty:
+                results[stmt_type] = None
+                continue
+
             results[stmt_type] = df
             logger.debug(
                 "yfinance: fetched %s for %s (%d years).",

@@ -327,11 +327,11 @@ class TestAssessTickerQuality:
     def test_insufficient_years_drop_reason_mentions_count(self) -> None:
         result = assess_ticker_quality(
             "TINY",
-            _make_income_df(n_years=4),
-            _make_balance_df(n_years=4),
-            _make_cashflow_df(n_years=4),
+            _make_income_df(n_years=3),
+            _make_balance_df(n_years=3),
+            _make_cashflow_df(n_years=3),
         )
-        assert "4 years" in result["drop_reason"]
+        assert "3 years" in result["drop_reason"]
 
     def test_missing_critical_field_drop_true(self) -> None:
         result = assess_ticker_quality(
@@ -398,13 +398,13 @@ class TestAssessTickerQuality:
         )
         assert result["drop_reason"] is None
 
-    def test_exactly_eight_years_passes(self) -> None:
-        """8 years = exactly min_history_years → should pass (not dropped)."""
+    def test_exactly_four_years_passes(self) -> None:
+        """4 years = exactly min_history_years → should pass (not dropped)."""
         result = assess_ticker_quality(
             "AAPL",
-            _make_income_df(n_years=8),
-            _make_balance_df(n_years=8),
-            _make_cashflow_df(n_years=8),
+            _make_income_df(n_years=4),
+            _make_balance_df(n_years=4),
+            _make_cashflow_df(n_years=4),
         )
         assert result["drop"] is False
 
@@ -446,7 +446,7 @@ class TestAssessTickerQuality:
         """If min_field_coverage_years is absent from config, it should fall back
         to min_history_years as a safe default."""
         mock_cfg.return_value = {
-            "universe": {"min_history_years": 8},
+            "universe": {"min_history_years": 4},
             "data_quality": {
                 # min_field_coverage_years intentionally omitted.
                 "max_substitutions_before_flag": 2,
@@ -468,9 +468,9 @@ class TestAssessTickerQuality:
         """Substitution warning threshold must come from
         data_quality.max_substitutions_before_flag config key."""
         mock_cfg.return_value = {
-            "universe": {"min_history_years": 8},
+            "universe": {"min_history_years": 4},
             "data_quality": {
-                "min_field_coverage_years": 8,
+                "min_field_coverage_years": 3,
                 "max_substitutions_before_flag": 1,  # Low threshold.
             },
         }

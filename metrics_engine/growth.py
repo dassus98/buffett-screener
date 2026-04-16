@@ -146,11 +146,12 @@ def compute_eps_cagr(eps_series: pd.Series) -> dict[str, Any]:
     current_eps = float(eps.iloc[-1]) if len(eps) > 0 else float("nan")
     positive_count = int((eps > 0).sum())
 
-    # --- Step 2: Guard — fewer than 5 positive EPS years → cannot establish trend ---
+    # --- Step 2: Guard — fewer than 3 positive EPS years → cannot establish trend ---
     # Per FORMULAS.md F11: drop the security. Log at ERROR.
-    if positive_count < 5:
+    # Lowered from 5 to 3 to support yfinance data (4-5 usable years).
+    if positive_count < 3:
         logger.error(
-            "EPS CAGR: %d positive EPS year(s) < 5 minimum. Security flagged for drop.",
+            "EPS CAGR: %d positive EPS year(s) < 3 minimum. Security flagged for drop.",
             positive_count,
         )
         return {

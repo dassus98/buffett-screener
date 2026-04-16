@@ -3,7 +3,7 @@ screener/exclusions.py, and screener/composite_ranker.py.
 
 Covers:
 - Hard filter ROE threshold (10 % fails, 20 % passes, 15 % boundary)
-- Hard filter earnings consistency (6 profitable years fails, 8 passes)
+- Hard filter earnings consistency (2 profitable years fails, 3 passes)
 - All 5 filters applied — no filter is skipped
 - NaN handling — NaN on any metric -> fail
 - Edge cases: EPS CAGR = 0 fails (strictly >), debt = inf fails, debt = 0 passes
@@ -107,18 +107,18 @@ class TestHardFilterRoeFloor:
 
 
 class TestHardFilterEarningsConsistency:
-    """Earnings consistency: profitable_years >= 8 (from config)."""
+    """Earnings consistency: profitable_years >= 3 (from config)."""
 
-    def test_6_profitable_years_fails(self):
-        """Stock with 6 profitable years fails (threshold is 8)."""
-        df = _df(_passing_row(ticker="LOW_EARN", profitable_years=6))
+    def test_2_profitable_years_fails(self):
+        """Stock with 2 profitable years fails (threshold is 3)."""
+        df = _df(_passing_row(ticker="LOW_EARN", profitable_years=2))
         survivors, log = apply_hard_filters(df)
         assert len(survivors) == 0
         assert not _filter_result(log, "LOW_EARN", "earnings_consistency")
 
-    def test_8_profitable_years_passes(self):
-        """Stock with exactly 8 profitable years passes."""
-        df = _df(_passing_row(ticker="OK_EARN", profitable_years=8))
+    def test_3_profitable_years_passes(self):
+        """Stock with exactly 3 profitable years passes."""
+        df = _df(_passing_row(ticker="OK_EARN", profitable_years=3))
         _, log = apply_hard_filters(df)
         assert _filter_result(log, "OK_EARN", "earnings_consistency")
 

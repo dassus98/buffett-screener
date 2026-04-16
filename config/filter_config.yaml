@@ -16,7 +16,7 @@
 universe:
   exchanges: [TSX, NYSE, NASDAQ]   # Add or remove to scope the screening universe
   min_market_cap_usd: 500_000_000  # $500M USD minimum — full dollars, not thousands
-  min_history_years: 8             # Minimum complete fiscal years required for inclusion
+  min_history_years: 4             # Minimum complete fiscal years required for inclusion
   required_history_years: 10       # Target history window for all formulas
 
 
@@ -93,7 +93,7 @@ exclusions:
 # Data Quality
 # ---------------------------------------------------------------------------
 data_quality:
-  min_field_coverage_years: 8     # Drop ticker if required field available in < 8 of 10 years
+  min_field_coverage_years: 3     # Drop ticker if required field available in < 3 years
   cross_validate_sample_size: 20  # Number of tickers to cross-check FMP vs yfinance
   cross_validate_tolerance: 0.05  # Flag if FMP vs yfinance diverge by > 5% on same field
   max_substitutions_before_flag: 2  # Flag ticker if > 2 line items required substitution
@@ -104,7 +104,7 @@ data_quality:
 # Implemented in screener/hard_filters.py
 # ---------------------------------------------------------------------------
 hard_filters:
-  min_profitable_years: 8         # Net income > 0 in at least 8 of last 10 fiscal years (F10)
+  min_profitable_years: 3         # Net income > 0 in at least 3 of last fiscal years (F10)
   min_avg_roe: 0.15               # 10-year average ROE ≥ 15% (F3)
   min_eps_cagr: 0.0               # 10-year EPS CAGR must be positive (F11)
   max_debt_payoff_years: 5        # Long-term debt payable in ≤ 5 years of owner earnings (F5)

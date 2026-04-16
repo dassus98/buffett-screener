@@ -11,8 +11,8 @@ Design decisions:
   - KO income statement uses ``netIncomeFromContinuingOperations`` (a valid
     substitute for ``net_income``) instead of the ideal ``netIncome`` field, so
     that the substitution log is non-empty.
-  - THIN has only 3 years of data, well below the configured
-    ``universe.min_history_years = 8``, and must be marked drop=True.
+  - THIN has only 3 years of data, below the configured
+    ``universe.min_history_years = 4``, and must be marked drop=True.
 """
 
 from __future__ import annotations

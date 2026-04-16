@@ -921,12 +921,38 @@ class TestComputeEpsCagr:
         expected = (4.0 / 2.0) ** (1 / 4) - 1
         assert result["eps_cagr"] == pytest.approx(expected, rel=1e-4)
 
-    def test_fewer_than_5_positive_years_returns_nan(self):
-        """Only 3 positive EPS years → CAGR = NaN (flagged for drop)."""
-        eps = pd.Series([-1.0, -2.0, 1.0, 2.0, 3.0, -4.0],
+    def test_fewer_than_3_positive_years_returns_nan(self):
+        """Only 2 positive EPS years → CAGR = NaN (flagged for drop)."""
+        eps = pd.Series([-1.0, -2.0, 1.0, 2.0, -3.0, -4.0],
                         index=[2017, 2018, 2019, 2020, 2021, 2022])
         result = compute_eps_cagr(eps)
         assert math.isnan(result["eps_cagr"])
+
+    def test_3_positive_years_returns_valid_cagr(self):
+        """3 positive EPS years → valid CAGR (guard lowered from 5 to 3)."""
+        # positive years: 2019 (1.0), 2020 (2.0), 2021 (3.0) → positive_count=3
+        # base resolves to 2019 (first positive), current_eps=3.0
+        # n_years = 2021 − 2019 = 2 → CAGR = (3/1)^(1/2) − 1
+        eps = pd.Series([-1.0, -2.0, 1.0, 2.0, 3.0],
+                        index=[2017, 2018, 2019, 2020, 2021])
+        result = compute_eps_cagr(eps)
+        expected = (3.0 / 1.0) ** (1 / 2) - 1
+        assert result["eps_cagr"] == pytest.approx(expected, rel=1e-4)
+        assert result["base_year"] == 2019
+        assert result["base_eps"] == pytest.approx(1.0)
+
+    def test_4_positive_years_returns_valid_cagr(self):
+        """4 positive EPS years → valid CAGR (guard lowered from 5 to 3)."""
+        # positive years: 2019–2022 → positive_count=4
+        # base = 2019, current_eps = 4.0
+        # n_years = 2022 − 2019 = 3 → CAGR = (4/1)^(1/3) − 1
+        eps = pd.Series([-1.0, 1.0, 2.0, 3.0, 4.0],
+                        index=[2018, 2019, 2020, 2021, 2022])
+        result = compute_eps_cagr(eps)
+        expected = (4.0 / 1.0) ** (1 / 3) - 1
+        assert result["eps_cagr"] == pytest.approx(expected, rel=1e-4)
+        assert result["base_year"] == 2019
+        assert result["base_eps"] == pytest.approx(1.0)
 
     def test_decline_years_counted_correctly(self):
         """EPS sequence [3,2,4,3,5] has 2 year-over-year declines."""
