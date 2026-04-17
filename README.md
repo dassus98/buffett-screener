@@ -18,30 +18,66 @@ Principles and formulas are derived from:
 
 ## Installation
 
-### Prerequisites
+### Option A: Local (Python)
 
-- Python 3.11 or higher
-- pip
-
-### Setup
+**Prerequisites:** Python 3.11+ and pip.
 
 ```bash
 # Clone the repository
 git clone https://github.com/your-org/buffett-screener.git
 cd buffett-screener
 
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # Linux/macOS
-# .venv\Scripts\activate   # Windows
+# Quick setup via Makefile (creates venv, installs all pinned deps)
+make install
+source .venv/bin/activate
 
-# Install in editable mode (includes all dependencies)
-pip install -e .
+# Or manually:
+python -m venv .venv
+source .venv/bin/activate           # Linux/macOS
+# .venv\Scripts\activate            # Windows
+
+pip install -r requirements.txt     # Install ALL 68 pinned packages (direct + transitive)
+pip install -e .                    # Install the project itself in editable mode
 
 # Configure API keys
 cp .env.example .env
 # Edit .env and add your API keys (see below)
 ```
+
+`requirements.txt` pins every direct and transitive dependency to exact versions. This ensures identical environments across machines. To update after adding a new package:
+
+```bash
+pip install <package>
+pip freeze | grep -v '^-e ' > requirements.txt
+```
+
+### Option B: Docker
+
+**Prerequisites:** Docker and Docker Compose.
+
+```bash
+# Clone and configure
+git clone https://github.com/your-org/buffett-screener.git
+cd buffett-screener
+cp .env.example .env
+# Edit .env with your API keys
+
+# Build the image (installs requirements.txt inside the container)
+docker build -t buffett-screener .
+
+# Run the full pipeline (data persisted to ./data via volume mount)
+docker run --env-file .env -v ./data:/app/data buffett-screener
+
+# Launch the Streamlit dashboard (accessible at http://localhost:8501)
+docker run --env-file .env -v ./data:/app/data -p 8501:8501 \
+    buffett-screener streamlit run output/streamlit_app.py \
+    --server.headless true --server.port 8501 --server.address 0.0.0.0
+
+# Or use docker compose (runs pipeline, then launches dashboard):
+docker compose up
+```
+
+The Dockerfile uses `requirements.txt` as its first `COPY` + `RUN` layer, so dependency installation is cached and only re-runs when `requirements.txt` changes.
 
 ### API Keys
 
@@ -487,13 +523,84 @@ The screener recommends the optimal registered account for Canadian investors ba
 
 ```bash
 # Run the full test suite (1,234 tests)
-pytest tests/ -v
+make test
+# or: pytest tests/ -v
 
 # Run a specific test module
 pytest tests/test_formulas.py -v
 
 # Run with short tracebacks
 pytest tests/ -q --tb=short
+
+# Run tests in Docker
+docker run buffett-screener pytest tests/ -v --tb=short
+```
+
+## Makefile Commands
+
+Run `make help` to see all available commands:
+
+| Command | Description |
+|---|---|
+| `make install` | Create venv and install all dependencies |
+| `make test` | Run the full test suite |
+| `make lint` | Run ruff linter and mypy type checker |
+| `make pipeline` | Run the full pipeline (fetch + metrics + screen + reports) |
+| `make pipeline-fast` | Re-run without data fetching (skip acquisition) |
+| `make dashboard` | Launch the Streamlit dashboard |
+| `make clean` | Remove caches and compiled files |
+| `make clean-data` | Remove all generated data (DuckDB, reports, caches) |
+| `make docker-build` | Build the Docker image |
+| `make docker-run` | Run the pipeline in Docker |
+| `make docker-dashboard` | Launch Streamlit dashboard in Docker |
+| `make docker-test` | Run tests in Docker |
+
+## Reproducibility
+
+Every file needed to recreate the environment from scratch is committed to the repository:
+
+| File | Purpose |
+|---|---|
+| `requirements.txt` | **Full dependency lockfile** -- all 68 packages (direct + transitive) pinned to exact versions. Ensures `pip install -r requirements.txt` produces a byte-identical environment on any machine. |
+| `pyproject.toml` | Package metadata, minimum dependency ranges, pytest/ruff/mypy config. Used by `pip install -e .` to register the project as an importable package. |
+| `Dockerfile` | Deterministic container build on `python:3.12-slim`. Installs `requirements.txt` first (cached layer), then copies source. Produces a self-contained ~400MB image. |
+| `docker-compose.yml` | Multi-service orchestration: `pipeline` (runs screener), `dashboard` (Streamlit on port 8501), `tests` (test suite). Data and config mounted as volumes. |
+| `.dockerignore` | Excludes `.env`, `data/`, caches, `.git/` from Docker build context for smaller, safer images. |
+| `.env.example` | Template with all supported environment variables: `FMP_API_KEY`, `FRED_API_KEY`, `ANTHROPIC_API_KEY`, `SEC_USER_AGENT`. Copy to `.env` and fill in. |
+| `.gitignore` | Excludes `data/`, `.env`, `__pycache__/`, `.venv/`, IDE files from version control. |
+| `Makefile` | 13 task shortcuts: `install`, `test`, `lint`, `pipeline`, `pipeline-fast`, `dashboard`, `clean`, `clean-data`, `docker-build`, `docker-run`, `docker-dashboard`, `docker-test`. |
+| `config/filter_config.yaml` | Single source of truth for all thresholds, weights, API endpoints, scenario parameters. |
+| `.streamlit/config.toml` | Streamlit theme (colors, font) and server settings (headless mode). |
+
+### Reproducing from scratch
+
+```bash
+# 1. Clone
+git clone https://github.com/your-org/buffett-screener.git && cd buffett-screener
+
+# 2. Environment
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt    # All 68 packages, exact versions
+pip install -e .                   # Register project package
+
+# 3. API keys (optional -- pipeline works without any keys)
+cp .env.example .env               # Edit with your keys
+
+# 4. Run
+python -m output.pipeline_runner --mode reports
+
+# 5. View results
+streamlit run output/streamlit_app.py
+# Or: ls data/reports/
+```
+
+Or with Docker (zero local dependencies beyond Docker itself):
+
+```bash
+git clone https://github.com/your-org/buffett-screener.git && cd buffett-screener
+cp .env.example .env
+docker compose up
+# Pipeline runs, then dashboard launches at http://localhost:8501
 ```
 
 ## Key Design Decisions

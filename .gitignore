@@ -1,15 +1,32 @@
+# Data (generated at runtime, not committed)
 data/
+
+# Environment secrets
 .env
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
-.mypy_cache/
-.ruff_cache/
 *.egg-info/
 dist/
 build/
 .venv/
 venv/
+
+# Testing & linting
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 htmlcov/
 .coverage
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

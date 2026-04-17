@@ -1,0 +1,42 @@
+# docker-compose.yml
+# Usage:
+#   docker compose up pipeline        # Run the full pipeline
+#   docker compose up dashboard       # Launch the Streamlit dashboard
+#   docker compose run pipeline bash  # Interactive shell
+#   docker compose run tests          # Run the test suite
+
+services:
+  pipeline:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data          # Persist DuckDB, reports, and caches
+      - ./config:/app/config      # Allow config edits without rebuild
+    command: >
+      python -m output.pipeline_runner
+      --mode reports
+      --top 50
+      --no-moat
+
+  dashboard:
+    build: .
+    env_file: .env
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    command: >
+      streamlit run output/streamlit_app.py
+      --server.headless true
+      --server.port 8501
+      --server.address 0.0.0.0
+    depends_on:
+      pipeline:
+        condition: service_completed_successfully
+
+  tests:
+    build: .
+    command: pytest tests/ -v --tb=short
+    profiles:
+      - test
